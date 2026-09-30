@@ -12,6 +12,10 @@ namespace p5rpc.ultrawide
     /// A managed detour crashes (other mods call GetCursorPos from managed WndProc hooks → ReversePInvokeBadTransition),
     /// and an inline hook on user32 crashed on load. A background thread keeps the slot patched (in case something
     /// rewrites it) and updates the parameters the stub reads.
+    ///
+    /// When the game warps the cursor itself (SetCursorPos, e.g. mouse camera re-centring), expanding x would feed back
+    /// into the warp every frame and the camera spins off. So SetCursorPos is redirected too: it switches the expansion
+    /// off immediately, and it only comes back once the game has stopped warping for a while.
     /// </summary>
     public unsafe class MouseFix
     {
@@ -21,8 +25,9 @@ namespace p5rpc.ultrawide
             public int Enabled;
             public float Centre;
             public float InverseRatio;
-            public int Padding;
+            public int SetCalls;
             public nint Original;
+            public nint SetOriginal;
         }
 
         [DllImport("kernel32", CharSet = CharSet.Unicode)]
@@ -53,8 +58,14 @@ namespace p5rpc.ultrawide
         private readonly Func<float> _widthRatio;
         private readonly Func<bool> _enabled;
         private readonly Action<string> _log;
+        private const long WarpQuietMs = 500;
+
         private readonly nint _stub;
+        private readonly nint _setStub;
         private readonly nint* _slot;
+        private readonly nint* _setSlot;
+        private int _lastSetCalls;
+        private long _warpQuietUntil;
         private readonly Parameters* _parameters;
         private nint _window;
 
@@ -66,9 +77,10 @@ namespace p5rpc.ultrawide
             _log = log;
 
             _slot = FindImportSlot(GetModuleHandleW(null), "user32.dll", "GetCursorPos");
-            if (_slot == null)
+            _setSlot = FindImportSlot(GetModuleHandleW(null), "user32.dll", "SetCursorPos");
+            if (_slot == null || _setSlot == null)
             {
-                _log("MouseFix: GetCursorPos import not found; mouse fix disabled.");
+                _log("MouseFix: cursor imports not found; mouse fix disabled.");
                 return;
             }
 
@@ -79,10 +91,14 @@ namespace p5rpc.ultrawide
             _stub = memory;
             _parameters = (Parameters*)(memory + 0x800);
             *_parameters = default;
-            _parameters->Original = GetProcAddress(GetModuleHandleW("user32.dll"), "GetCursorPos");
+            var user32 = GetModuleHandleW("user32.dll");
+            _parameters->Original = GetProcAddress(user32, "GetCursorPos");
+            _parameters->SetOriginal = GetProcAddress(user32, "SetCursorPos");
 
             var length = WriteStub((byte*)memory, (nint)_parameters);
             RegisterUnwindInfo(memory, length);
+            _setStub = memory + 0x200;
+            WriteSetStub((byte*)_setStub, (nint)_parameters);
 
             new Thread(UpdateLoop) { IsBackground = true, Name = "p5rpc.ultrawide mouse" }.Start();
         }
@@ -126,6 +142,20 @@ namespace p5rpc.ultrawide
             for (var i = 0; i < c.Count; i++)
                 code[i] = c[i];
             return c.Count;
+        }
+
+        /// <summary>
+        /// int SetCursorPos(int x, int y): enabled = 0; SetCalls++; tail-jump to the original (a leaf, no unwind data).
+        /// </summary>
+        private static void WriteSetStub(byte* code, nint parameters)
+        {
+            var c = new List<byte>();
+            c.AddRange(new byte[] { 0x49, 0xBA }); c.AddRange(BitConverter.GetBytes((long)parameters)); // mov r10, parameters
+            c.AddRange(new byte[] { 0x41, 0xC7, 0x02, 0x00, 0x00, 0x00, 0x00 });  // mov dword [r10], 0    (Enabled)
+            c.AddRange(new byte[] { 0xF0, 0x41, 0xFF, 0x42, 0x0C });              // lock inc dword [r10+0Ch] (SetCalls)
+            c.AddRange(new byte[] { 0x41, 0xFF, 0x62, 0x18 });                    // jmp [r10+18h]        (SetOriginal)
+            for (var i = 0; i < c.Count; i++)
+                code[i] = c[i];
         }
 
         /// <summary>
@@ -186,20 +216,20 @@ namespace p5rpc.ultrawide
             return null;
         }
 
-        /// <summary>Points the import slot at the stub, chaining to whatever it held before.</summary>
-        private void PatchSlot()
+        /// <summary>Points an import slot at a stub, chaining to whatever it held before.</summary>
+        private void PatchSlot(nint* slot, nint stub, nint* original, string name)
         {
-            var current = *_slot;
-            if (current == _stub)
+            var current = *slot;
+            if (current == stub)
                 return;
             if (current != 0)
-                _parameters->Original = current;
+                *original = current;
 
-            if (VirtualProtect((nint)_slot, (nuint)sizeof(nint), PAGE_READWRITE, out var oldProtect) == 0)
+            if (VirtualProtect((nint)slot, (nuint)sizeof(nint), PAGE_READWRITE, out var oldProtect) == 0)
                 return;
-            *_slot = _stub;
-            VirtualProtect((nint)_slot, (nuint)sizeof(nint), oldProtect, out _);
-            _log($"MouseFix: redirected GetCursorPos import (previous target 0x{current:X}).");
+            *slot = stub;
+            VirtualProtect((nint)slot, (nuint)sizeof(nint), oldProtect, out _);
+            _log($"MouseFix: redirected {name} import (previous target 0x{current:X}).");
         }
 
         private void UpdateLoop()
@@ -210,14 +240,24 @@ namespace p5rpc.ultrawide
             {
                 try
                 {
-                    PatchSlot();
+                    // Patch SetCursorPos first so a warp can never meet an expanded GetCursorPos unnoticed.
+                    PatchSlot(_setSlot, _setStub, &_parameters->SetOriginal, "SetCursorPos");
+                    PatchSlot(_slot, _stub, &_parameters->Original, "GetCursorPos");
+
+                    var now = Environment.TickCount64;
+                    var setCalls = Volatile.Read(ref _parameters->SetCalls);
+                    if (setCalls != _lastSetCalls)
+                    {
+                        _lastSetCalls = setCalls;
+                        _warpQuietUntil = now + WarpQuietMs;
+                    }
 
                     var ratio = _widthRatio();
                     if (_window == 0)
                         _window = Process.GetCurrentProcess().MainWindowHandle;
 
                     origin[0] = origin[1] = 0;
-                    var valid = _enabled() && ratio < 0.999f && _window != 0 &&
+                    var valid = now >= _warpQuietUntil && _enabled() && ratio < 0.999f && _window != 0 &&
                                 GetClientRect(_window, rect) != 0 && ClientToScreen(_window, origin) != 0;
                     if (!valid)
                     {
