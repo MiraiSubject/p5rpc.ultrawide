@@ -15,7 +15,27 @@
   "HasExports": false,
   "IsLibrary": false,
   "ReleaseMetadataFileName": "p5rpc.ultrawide.ReleaseMetadata.json",
-  "PluginData": {},
+  "PluginData": {
+    "GitHubRelease": {
+      "UserName": "MiraiSubject",
+      "RepositoryName": "p5rpc.ultrawide",
+      "UseReleaseTag": true,
+      "AssetFileName": "p5rpc.ultrawide.zip"
+    },
+    "GitHubDependencies": {
+      "IdToConfigMap": {
+        "reloaded.sharedlib.hooks": {
+          "Config": {
+            "UserName": "Sewer56",
+            "RepositoryName": "Reloaded.SharedLib.Hooks.ReloadedII",
+            "UseReleaseTag": true,
+            "AssetFileName": "reloaded.sharedlib.hooks.zip"
+          },
+          "ReleaseMetadataName": "Sewer56.Update.ReleaseMetadata.json"
+        }
+      }
+    }
+  },
   "IsUniversalMod": false,
   "ModDependencies": [
     "reloaded.sharedlib.hooks"
@@ -24,5 +44,5 @@
   "SupportedAppId": [
     "p5r.exe"
   ],
-  "ProjectUrl": ""
+  "ProjectUrl": "https://github.com/MiraiSubject/p5rpc.ultrawide"
 }
