@@ -64,6 +64,9 @@ namespace p5rpc.ultrawide
         private readonly int* _renderSize;       // render size copy { w, h }
         private readonly float* _uiScale;        // { scaleX, scaleY, baseScaleX, baseScaleY } = size / (1920, 1080)
         private readonly nint* _systemConstants; // -> GFD_VSCONST_SYSTEM mirror, scale2D at +0x20
+        private readonly nint _keyboardWidthCallA, _keyboardWidthCallB;
+        private readonly byte[] _keyboardWidthOriginalA, _keyboardWidthOriginalB;
+        private int _keyboardWidthOverride = -1;
 
         private float _screenAspect = Aspect16x9;
         private float _appliedCameraAspect = Aspect16x9;
@@ -97,6 +100,19 @@ namespace p5rpc.ultrawide
                 "F3 0F 10 0D ?? ?? ?? ?? F3 0F 10 05 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? F3 0F 11 0D ?? ?? ?? ?? F3 0F 11 05 ?? ?? ?? ?? F3 0F 11 48 20");
             _uiScale = (float*)GameScanner.RipTarget(uiScaleRestore + 0x17, 4, 8);
             _systemConstants = (nint*)GameScanner.RipTarget(uiScaleRestore + 0x10, 3, 7);
+
+            // The keyboard button resource task uses the display width to construct its small key-cap textures.
+            // It must see the fitted 16:9 width, or labels such as Tab are clipped inside the texture itself.
+            var keyboardResourceEvent = scanner.Find("KeyboardResourceEvent",
+                "4C 8B DC 49 89 53 10 49 89 4B 08 55 41 56 41 57");
+            var keyboardResourceDraw = scanner.Find("KeyboardResourceDraw",
+                "48 8B C4 48 89 50 10 48 89 48 08 55 48 8D A8 D8 F9 FF FF");
+            _keyboardWidthCallA = GameScanner.FindWithin("KeyboardResourceEvent width", keyboardResourceEvent, 0x100,
+                "E8 ?? ?? ?? ?? 66 0F 6E F0 0F 5B F6 F3 0F 59 35");
+            _keyboardWidthCallB = GameScanner.FindWithin("KeyboardResourceDraw width", keyboardResourceDraw, 0x100,
+                "E8 ?? ?? ?? ?? 66 44 0F 6E C0 45 0F 5B C0 F3 44 0F 59 05");
+            _keyboardWidthOriginalA = SaveKeyboardWidthCall(_keyboardWidthCallA);
+            _keyboardWidthOriginalB = SaveKeyboardWidthCall(_keyboardWidthCallB);
 
             // gfdCameraUpdate: rebuilds the projection from near/far/fovy/aspect when the dirty bit is set.
             var cameraUpdate = scanner.Find("gfdCameraUpdate", "48 8B C4 55 53 56 57 41 56 48 8D 6C 24 90");
@@ -270,6 +286,7 @@ namespace p5rpc.ultrawide
 
             var aspect = height > 0 ? (float)width / height : Aspect16x9;
             var screenAspect = _config.WidenGame ? Math.Max(aspect, Aspect16x9) : Aspect16x9;
+            UpdateKeyboardWidthCalls(width, height);
 
             // The game truncates height * constant, so bias it by half a pixel to land exactly on the window width.
             var constant = screenAspect > Aspect16x9 ? (width + 0.5f) / height : Aspect16x9;
@@ -279,6 +296,39 @@ namespace p5rpc.ultrawide
             _screenAspect = screenAspect;
             Memory.Instance.SafeWrite((nuint)_aspectConstant, constant);
             return true;
+        }
+
+        private byte[] SaveKeyboardWidthCall(nint call)
+        {
+            var getter = GameScanner.RipTarget(call, 1, 5);
+            if (*(byte*)call != 0xE8 || *(byte*)getter != 0x8B || *(byte*)(getter + 1) != 0x05 ||
+                GameScanner.RipTarget(getter, 2, 6) != (nint)_screen2DSize)
+                throw new Exception("Keyboard button width call does not target the 2D width getter.");
+            var original = new byte[5];
+            Marshal.Copy(call, original, 0, original.Length);
+            return original;
+        }
+
+        private void UpdateKeyboardWidthCalls(int width, int height)
+        {
+            var fitWidth = height > 0 ? Math.Min(width, (int)(height * Aspect16x9)) : width;
+            var overrideWidth = _config.WidenGame && fitWidth < width ? fitWidth : 0;
+            if (_keyboardWidthOverride == overrideWidth)
+                return;
+
+            if (overrideWidth == 0)
+            {
+                Memory.Instance.SafeWriteRaw((nuint)_keyboardWidthCallA, _keyboardWidthOriginalA);
+                Memory.Instance.SafeWriteRaw((nuint)_keyboardWidthCallB, _keyboardWidthOriginalB);
+            }
+            else
+            {
+                var patch = new byte[] { 0xB8, (byte)overrideWidth, (byte)(overrideWidth >> 8),
+                    (byte)(overrideWidth >> 16), (byte)(overrideWidth >> 24) };
+                Memory.Instance.SafeWriteRaw((nuint)_keyboardWidthCallA, patch);
+                Memory.Instance.SafeWriteRaw((nuint)_keyboardWidthCallB, patch);
+            }
+            _keyboardWidthOverride = overrideWidth;
         }
 
         private nint CameraUpdateImpl(nint camera, int a2)
