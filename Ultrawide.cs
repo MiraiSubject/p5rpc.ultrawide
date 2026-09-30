@@ -40,6 +40,10 @@ namespace p5rpc.ultrawide
         [Function(CallingConventions.Microsoft)]
         public delegate nint CameraUpdate(nint camera, int a2);
 
+        // Both key-cap texture builders take two pointer arguments; all four argument registers are passed through.
+        [Function(CallingConventions.Microsoft)]
+        public delegate nint KeyboardResource(nint a1, nint a2, nint a3, nint a4);
+
         [Function(CallingConventions.Microsoft)]
         public delegate void SetResolution(nint target, int width, int height);
 
@@ -70,6 +74,8 @@ namespace p5rpc.ultrawide
         private readonly nint _keyboardWidthCallA, _keyboardWidthCallB;
         private readonly byte[] _keyboardWidthOriginalA, _keyboardWidthOriginalB;
         private int _keyboardWidthOverride = -1;
+        private readonly IHook<KeyboardResource> _keyboardResourceEventHook, _keyboardResourceDrawHook;
+        [ThreadStatic] private static int _keyboardTextureDepth;
 
         private float _screenAspect = Aspect16x9;
         private float _appliedCameraAspect = Aspect16x9;
@@ -104,8 +110,9 @@ namespace p5rpc.ultrawide
             _uiScale = (float*)GameScanner.RipTarget(uiScaleRestore + 0x17, 4, 8);
             _systemConstants = (nint*)GameScanner.RipTarget(uiScaleRestore + 0x10, 3, 7);
 
-            // The keyboard button resource task uses the display width to construct its small key-cap textures.
-            // It must see the fitted 16:9 width, or labels such as Tab are clipped inside the texture itself.
+            // The keyboard button resource task draws its small key-cap textures with the same 2D primitives as
+            // the UI. It sizes each key from the display width, so it must see the fitted 16:9 width or labels
+            // such as Tab are clipped inside the texture. Its draws are also widened; see KeyboardTexture.
             var keyboardResourceEvent = scanner.Find("KeyboardResourceEvent",
                 "4C 8B DC 49 89 53 10 49 89 4B 08 55 41 56 41 57");
             var keyboardResourceDraw = scanner.Find("KeyboardResourceDraw",
@@ -142,6 +149,9 @@ namespace p5rpc.ultrawide
             _applyScreenSettingsHook = hooks.CreateHook<ApplyScreenSettings>(ApplyScreenSettingsImpl, applyScreenSettings).Activate();
             _immediateRenderHook = hooks.CreateHook<ImmediateRender>(ImmediateRenderImpl, immediateRender).Activate();
             _immediateRenderIndexedHook = hooks.CreateHook<ImmediateRenderIndexed>(ImmediateRenderIndexedImpl, immediateRenderIndexed).Activate();
+
+            _keyboardResourceEventHook = hooks.CreateHook<KeyboardResource>(KeyboardResourceEventImpl, keyboardResourceEvent).Activate();
+            _keyboardResourceDrawHook = hooks.CreateHook<KeyboardResource>(KeyboardResourceDrawImpl, keyboardResourceDraw).Activate();
 
             _cameraUpdateHook = hooks.CreateHook<CameraUpdate>(CameraUpdateImpl, cameraUpdate).Activate();
             _setResolutionHook = hooks.CreateHook<SetResolution>(SetResolutionImpl, setResolution).Activate();
@@ -203,9 +213,36 @@ namespace p5rpc.ultrawide
             return _immediateRenderIndexedHook.OriginalFunction(prio, type, count, indices, indexCount, a6, vertices, stride, fvf, a10);
         }
 
+        private nint KeyboardResourceEventImpl(nint a1, nint a2, nint a3, nint a4) =>
+            KeyboardTexture(_keyboardResourceEventHook, a1, a2, a3, a4);
+
+        private nint KeyboardResourceDrawImpl(nint a1, nint a2, nint a3, nint a4) =>
+            KeyboardTexture(_keyboardResourceDrawHook, a1, a2, a3, a4);
+
+        // The 2D projection is built for the wide screen, so inside a key-cap texture it narrows each key by
+        // 16:9 / screen aspect and leaves the rest of the texture empty. Widen those draws back while it runs.
+        private static nint KeyboardTexture(IHook<KeyboardResource> hook, nint a1, nint a2, nint a3, nint a4)
+        {
+            _keyboardTextureDepth++;
+            try { return hook.OriginalFunction(a1, a2, a3, a4); }
+            finally { _keyboardTextureDepth--; }
+        }
+
         private void TryCenterVertices(nint vertices, int count, int stride, int fvf, int prio, char path)
         {
-            if (!_config.CenterUi || _screenAspect <= Aspect16x9 + 0.001f || vertices == 0 || count <= 0 || stride < 12)
+            if (_screenAspect <= Aspect16x9 + 0.001f || vertices == 0 || count <= 0 || stride < 12)
+                return;
+
+            // This follows the widened screen rather than CenterUi: the narrowing happens either way.
+            if (_keyboardTextureDepth > 0)
+            {
+                var widen = _screenAspect / Aspect16x9;
+                for (var i = 0; i < count; i++)
+                    *(float*)(vertices + i * stride) *= widen;
+                return;
+            }
+
+            if (!_config.CenterUi)
                 return;
 
             var tracing = _traceRemaining > 0;
