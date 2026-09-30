@@ -21,6 +21,7 @@ namespace p5rpc.ultrawide
         private const float MaxPinOvershoot = 64f;
         private const float VirtualHeight = 1080f;
         private const float EdgeTolerance = 2f;
+        private const float MaxOffscreenSize = 512f;
 
         [Function(CallingConventions.Microsoft)]
         public delegate void FitViewport();
@@ -178,12 +179,16 @@ namespace p5rpc.ultrawide
                 return;
 
             var tracing = _traceRemaining > 0;
-            var before = tracing ? Bounds(vertices, count, stride) : default;
+            var before = Bounds(vertices, count, stride);
             string action;
 
-            // While the game renders 2D into an offscreen texture (e.g. keyboard key labels) it sets the UI scale
-            // to 1.0; those coordinates are texture pixels, not screen space, so leave them alone.
-            if (_uiScale[0] != _uiScale[2] || _uiScale[1] != _uiScale[3])
+            // Render-to-texture passes (e.g. keyboard key labels) set the UI scale to 1.0 and draw in texture pixels,
+            // which must not be squeezed. That scale is a global switched by render pass callbacks, so it can still
+            // read 1.0 while normal UI is submitted (it does whenever mouse control is active); only treat small
+            // texture-sized draws near the origin as offscreen.
+            var scaleOverridden = _uiScale[0] == 1f && _uiScale[1] == 1f && (_uiScale[2] != 1f || _uiScale[3] != 1f);
+            if (scaleOverridden && before.MinX >= -EdgeTolerance && before.MinY >= -EdgeTolerance &&
+                before.MaxX <= MaxOffscreenSize && before.MaxY <= MaxOffscreenSize)
             {
                 _offscreenCount++;
                 action = "offscreen";
@@ -197,7 +202,7 @@ namespace p5rpc.ultrawide
             {
                 _traceRemaining--;
                 var after = Bounds(vertices, count, stride);
-                Log($"trace {path} n={count} stride={stride} fvf=0x{fvf:x} scale=({_uiScale[0]:0.###},{_uiScale[1]:0.###}) " +
+                Log($"trace {path} thread={Environment.CurrentManagedThreadId} n={count} stride={stride} fvf=0x{fvf:x} scale=({_uiScale[0]:0.###},{_uiScale[1]:0.###}) " +
                     $"x={before.MinX:0.#}..{before.MaxX:0.#} y={before.MinY:0.#}..{before.MaxY:0.#} -> x={after.MinX:0.#}..{after.MaxX:0.#} {action}");
             }
         }
