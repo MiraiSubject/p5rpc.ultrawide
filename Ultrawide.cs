@@ -21,6 +21,7 @@ namespace p5rpc.ultrawide
         private const float MaxPinOvershoot = 64f;
         private const float VirtualHeight = 1080f;
         private const float EdgeTolerance = 2f;
+        private const float ScreenCopyOvershoot = 16f;
 
         [Function(CallingConventions.Microsoft)]
         public delegate void FitViewport();
@@ -215,10 +216,10 @@ namespace p5rpc.ultrawide
             var bounds = Bounds(vertices, count, stride);
             var fullWidth = bounds.MinX <= EdgeTolerance && bounds.MaxX >= VirtualWidth - EdgeTolerance;
             var fullHeight = bounds.MinY <= EdgeTolerance && bounds.MaxY >= VirtualHeight - EdgeTolerance;
-            var screenCopy = bounds.MinX >= -EdgeTolerance && bounds.MaxX <= VirtualWidth + EdgeTolerance &&
-                bounds.MinY >= -EdgeTolerance && bounds.MaxY <= VirtualHeight + EdgeTolerance;
+            var screenCopy = bounds.MinX >= -ScreenCopyOvershoot && bounds.MaxX <= VirtualWidth + ScreenCopyOvershoot &&
+                bounds.MinY >= -ScreenCopyOvershoot && bounds.MaxY <= VirtualHeight + ScreenCopyOvershoot;
 
-            // Solid fades/panels and exact 1920x1080 textured screen copies stay wide. Some menu artwork is a
+            // Solid fades/panels and near-1920x1080 textured screen copies stay wide. Some menu artwork is a
             // 2048x1536 textured quad that also spans the screen; it must be squeezed to preserve its proportions.
             if (fullWidth && (!textured || (fullHeight && screenCopy)))
             {
