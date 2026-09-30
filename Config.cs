@@ -65,6 +65,11 @@ namespace p5rpc.ultrawide.Configuration
         [DefaultValue(true)]
         public bool WidenGame { get; set; } = true;
 
+        [DisplayName("Keep UI 16:9")]
+        [Description("Draws menus, HUD, 2D backgrounds and movies in a centred 16:9 area instead of stretching them.")]
+        [DefaultValue(true)]
+        public bool CenterUi { get; set; } = true;
+
         [DisplayName("Enable Resolution Override")]
         [Description("Forces a resolution.")]
         [DefaultValue(false)]

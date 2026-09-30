@@ -15,8 +15,18 @@ namespace p5rpc.ultrawide
         private const int CameraAspectOffset = 0x1ac;
         private const int CameraDirtyOffset = 0x1b4;
 
+        // UI space used by GFD's immediate 2D primitives (vertex positions are in these units).
+        private const float VirtualWidth = 1920f;
+        private const int FvfTexCoord0 = 0x100;
+
         [Function(CallingConventions.Microsoft)]
         public delegate void FitViewport();
+
+        [Function(CallingConventions.Microsoft)]
+        public delegate void ApplyScreenSettings();
+
+        [Function(CallingConventions.Microsoft)]
+        public delegate nint ImmediateRender(int prio, int type, int count, nint vertices, int stride, int fvf, nint a7);
 
         [Function(CallingConventions.Microsoft)]
         public delegate nint CameraUpdate(nint camera, int a2);
@@ -28,6 +38,8 @@ namespace p5rpc.ultrawide
         private Config _config;
 
         private readonly IHook<FitViewport> _fitViewportHook;
+        private readonly IHook<ApplyScreenSettings> _applyScreenSettingsHook;
+        private readonly IHook<ImmediateRender> _immediateRenderHook;
         private readonly IHook<CameraUpdate> _cameraUpdateHook;
         private readonly IHook<SetResolution> _setResolutionHook;
 
@@ -78,11 +90,21 @@ namespace p5rpc.ultrawide
 
             var setResolution = scanner.Find("SetResolution", "85 D2 7E ?? 45 85 C0 7E ?? 89 51 1C 44 89 41 20");
 
+            // Larger screen setup routine containing its own copy of the fit logic; this is the path used in game.
+            var applyScreenSettings = scanner.Find("ApplyScreenSettings",
+                "40 55 53 48 8D 6C 24 D8 48 81 EC 28 01 00 00 80 3D ?? ?? ?? ?? 00 0F 84 ?? ?? ?? ?? 0F 28 0D");
+
+            // gfdDevCmdMakeImmediateRenderPrimitivePkt: every 2D sprite/primitive is submitted through here.
+            var immediateRender = scanner.Find("ImmediateRender",
+                "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20 48 8B 35 ?? ?? ?? ?? 4D 8B F1 41 8B D8 0F B6 EA");
+
             Log($"FitViewport=0x{fitViewport:x} aspectConst=0x{_aspectConstant:x} window=0x{(nint)_windowSize:x} " +
                 $"display=0x{(nint)_displaySize:x} 2D=0x{(nint)_screen2DSize:x} render=0x{(nint)_renderSize:x} " +
                 $"uiScale=0x{(nint)_uiScale:x} sysConst=0x{(nint)_systemConstants:x} camera=0x{cameraUpdate:x}");
 
             _fitViewportHook = hooks.CreateHook<FitViewport>(FitViewportImpl, fitViewport).Activate();
+            _applyScreenSettingsHook = hooks.CreateHook<ApplyScreenSettings>(ApplyScreenSettingsImpl, applyScreenSettings).Activate();
+            _immediateRenderHook = hooks.CreateHook<ImmediateRender>(ImmediateRenderImpl, immediateRender).Activate();
             _cameraUpdateHook = hooks.CreateHook<CameraUpdate>(CameraUpdateImpl, cameraUpdate).Activate();
             _setResolutionHook = hooks.CreateHook<SetResolution>(SetResolutionImpl, setResolution).Activate();
 
@@ -98,6 +120,57 @@ namespace p5rpc.ultrawide
 
         private void FitViewportImpl()
         {
+            UpdateAspectConstant();
+            _fitViewportHook.OriginalFunction();
+            if (_config.DebugLogging)
+                DumpState("FitViewport");
+        }
+
+        private void ApplyScreenSettingsImpl()
+        {
+            UpdateAspectConstant();
+            _applyScreenSettingsHook.OriginalFunction();
+            if (_config.DebugLogging)
+                DumpState("ApplyScreenSettings");
+        }
+
+        private nint ImmediateRenderImpl(int prio, int type, int count, nint vertices, int stride, int fvf, nint a7)
+        {
+            if (_config.CenterUi && _screenAspect > Aspect16x9 + 0.001f && vertices != 0 && count > 0 && stride >= 12)
+                CenterVertices(vertices, count, stride, (fvf & FvfTexCoord0) != 0);
+            return _immediateRenderHook.OriginalFunction(prio, type, count, vertices, stride, fvf, a7);
+        }
+
+        /// <summary>
+        /// 2D vertices are in 1920x1080 units which the shader stretches over the whole (now wider) screen.
+        /// Squeeze them horizontally around the centre so the UI keeps its 16:9 shape.
+        /// </summary>
+        private void CenterVertices(nint vertices, int count, int stride, bool textured)
+        {
+            var minX = float.MaxValue;
+            var maxX = float.MinValue;
+            for (var i = 0; i < count; i++)
+            {
+                var x = *(float*)(vertices + i * stride);
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+            }
+
+            // Solid full-screen quads (fades, flashes, dimming) should keep covering the whole screen.
+            if (!textured && minX <= 0.5f && maxX >= VirtualWidth - 0.5f)
+                return;
+
+            var ratio = Aspect16x9 / _screenAspect;
+            const float centre = VirtualWidth / 2f;
+            for (var i = 0; i < count; i++)
+            {
+                var x = (float*)(vertices + i * stride);
+                *x = centre + (*x - centre) * ratio;
+            }
+        }
+
+        private void UpdateAspectConstant()
+        {
             var width = _windowSize[0];
             var height = _windowSize[1];
             if (_windowSize[2] != -1 && _windowSize[3] != -1)
@@ -112,11 +185,6 @@ namespace p5rpc.ultrawide
             // The game truncates height * constant, so bias it by half a pixel to land exactly on the window width.
             var constant = _screenAspect > Aspect16x9 ? (width + 0.5f) / height : Aspect16x9;
             Memory.Instance.SafeWrite((nuint)_aspectConstant, constant);
-
-            _fitViewportHook.OriginalFunction();
-
-            if (_config.DebugLogging)
-                DumpState($"FitViewport window={width}x{height}");
         }
 
         private nint CameraUpdateImpl(nint camera, int a2)
