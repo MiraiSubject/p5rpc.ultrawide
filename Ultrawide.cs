@@ -23,7 +23,6 @@ namespace p5rpc.ultrawide
         private const float EdgeTolerance = 2f;
         private const float ScreenCopyOvershoot = 16f;
         private const int MaxPinnedVertices = 6;
-        private const float BattleButtonGlyphShift = 28f;
 
         [Function(CallingConventions.Microsoft)]
         public delegate void FitViewport();
@@ -53,7 +52,7 @@ namespace p5rpc.ultrawide
         private readonly IHook<ImmediateRenderIndexed> _immediateRenderIndexedHook;
         private volatile int _traceRemaining;
         private int _primitiveCount, _indexedPrimitiveCount, _centeredCount;
-        private (float X, float Y, float Shift)? _pendingBattleButtonGlyph;
+        private (float X, float Y)? _pendingBattleButtonGlyph;
 
         private readonly IHook<CameraUpdate> _cameraUpdateHook;
         private readonly IHook<SetResolution> _setResolutionHook;
@@ -256,30 +255,25 @@ namespace p5rpc.ultrawide
             var inWheel =
                 bounds.MinX is > 250f and < 1300f && bounds.MinY is > 350f and < 950f &&
                 width is > 25f and < 300f && height is > 30f and < 200f;
-            var abxy = inWheel && width is > 42f and < 45f && height is > 42f and < 45f &&
+            // Prompt frames are about 1.25x larger with controller glyphs than with keyboard ones, so the size
+            // windows cover both. Each frame is followed by its glyph, whose atlas depends on the input device.
+            var square = MathF.Abs(width - height) < 2f;
+            var abxy = inWheel && square && width is > 40f and < 60f &&
                 Near(uv[1], 0.0013020834f) &&
                 (Near(uv[0], 0.0013020834f) || Near(uv[0], 0.10286458f) ||
                  Near(uv[0], 0.20442709f) || Near(uv[0], 0.30598959f));
-            var dpad = inWheel && width is > 61f and < 66f && height is > 61f and < 66f &&
+            var dpad = inWheel && square && width is > 58f and < 85f &&
                 Near(uv[0], 0.80208337f) && Near(uv[1], 0.13411459f);
-            var trigger = inWheel && width is > 65f and < 70f && height is > 37f and < 41f &&
+            var trigger = inWheel && width is > 64f and < 90f && height is > 36f and < 52f &&
                 Near(uv[0], 0.40755209f) && Near(uv[1], 0.0013020834f);
             var pending = _pendingBattleButtonGlyph;
             var glyph = inWheel && pending.HasValue &&
                 MathF.Abs(bounds.MinX - pending.Value.X) < 16f &&
-                MathF.Abs(bounds.MinY - pending.Value.Y) < 4f &&
-                Near(uv[0], 0.0069444445f) && Near(uv[1], 0.020833334f);
+                MathF.Abs(bounds.MinY - pending.Value.Y) < 4f;
 
-            var shift = abxy ? BattleButtonGlyphShift : glyph ? pending!.Value.Shift : 0f;
-            _pendingBattleButtonGlyph = abxy || dpad || trigger
-                ? (bounds.MinX, bounds.MinY, abxy ? BattleButtonGlyphShift : 0f)
-                : null;
+            _pendingBattleButtonGlyph = abxy || dpad || trigger ? (bounds.MinX, bounds.MinY) : null;
             var artwork = inWheel && IsBattleCommandArt(uv[0], uv[1]);
-            if (!abxy && !dpad && !trigger && !glyph && !artwork)
-                return false;
-            for (var i = 0; i < count; i++)
-                *(float*)(vertices + i * stride) -= shift;
-            return true;
+            return abxy || dpad || trigger || glyph || artwork;
         }
 
         private static bool IsBattleCommandArt(float u, float v) =>
