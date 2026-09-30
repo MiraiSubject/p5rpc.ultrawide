@@ -60,6 +60,11 @@ namespace p5rpc.ultrawide.Configuration
         //    ILoveIt
         //}
 
+        [DisplayName("Widen Game View")]
+        [Description("Removes the pillarboxing and widens the 3D view to the window's aspect ratio.")]
+        [DefaultValue(true)]
+        public bool WidenGame { get; set; } = true;
+
         [DisplayName("Enable Resolution Override")]
         [Description("Forces a resolution.")]
         [DefaultValue(false)]
@@ -74,6 +79,29 @@ namespace p5rpc.ultrawide.Configuration
         [Description("Custom Resolution Height")]
         [DefaultValue(0)]
         public int Height { get; set; } = 0;
+
+        [Category("Debug")]
+        [DisplayName("Debug Logging")]
+        [Description("Logs screen and UI state on resolution changes and when F9 is pressed.")]
+        [DefaultValue(false)]
+        public bool DebugLogging { get; set; } = false;
+
+        [Category("Debug")]
+        [DisplayName("Load RenderDoc")]
+        [Description("Loads RenderDoc into the game so frames can be captured with F12. Requires a restart.")]
+        [DefaultValue(false)]
+        public bool LoadRenderDoc { get; set; } = false;
+
+        [Category("Debug")]
+        [DisplayName("RenderDoc DLL Path")]
+        [DefaultValue(@"C:\Program Files\RenderDoc\renderdoc.dll")]
+        public string RenderDocPath { get; set; } = @"C:\Program Files\RenderDoc\renderdoc.dll";
+
+        [Category("Debug")]
+        [DisplayName("RenderDoc Capture Path")]
+        [Description("Capture file path template (environment variables allowed). Empty uses RenderDoc's default.")]
+        [DefaultValue("")]
+        public string RenderDocCaptureTemplate { get; set; } = "";
     }
 
     /// <summary>

@@ -51,15 +51,10 @@ namespace p5rpc.ultrawide
             _modConfig = context.ModConfig;
 
 
-            // For more information about this template, please see
-            // https://reloaded-project.github.io/Reloaded-II/ModTemplate/
+            if (_configuration.LoadRenderDoc)
+                RenderDoc.TryLoad(_configuration.RenderDocPath, _configuration.RenderDocCaptureTemplate, _logger);
 
-            // If you want to implement e.g. unload support in your mod,
-            // and some other neat features, override the methods in ModBase.
-
-            // TODO: Implement some mod logic
-
-            _ultrawide = new Ultrawide(_hooks, _logger, _modLoader, _configuration);
+            _ultrawide = new Ultrawide(_hooks!, _logger, _configuration);
         }
 
         #region Standard Overrides
@@ -68,7 +63,7 @@ namespace p5rpc.ultrawide
             // Apply settings from configuration.
             // ... your code here.
             _configuration = configuration;
-            _logger.WriteLine($"[{_modConfig.ModId}] Config Updated: Applying");
+            _ultrawide.UpdateConfig(configuration);
         }
         #endregion
 
