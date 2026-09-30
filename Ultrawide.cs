@@ -126,9 +126,10 @@ namespace p5rpc.ultrawide
             _cameraUpdateHook = hooks.CreateHook<CameraUpdate>(CameraUpdateImpl, cameraUpdate).Activate();
             _setResolutionHook = hooks.CreateHook<SetResolution>(SetResolutionImpl, setResolution).Activate();
 
-            _mouseFix = new MouseFix(hooks,
+            _mouseFix = new MouseFix(
                 () => _screenAspect > Aspect16x9 ? Aspect16x9 / _screenAspect : 1f,
-                () => _config.CenterUi && _config.FixMouse);
+                () => _config.CenterUi && _config.FixMouse,
+                Log);
 
             if (_config.DebugLogging)
                 StartDebugHotkeys();

@@ -1,7 +1,5 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using Reloaded.Hooks.Definitions;
-using Reloaded.Hooks.Definitions.X64;
 
 namespace p5rpc.ultrawide
 {
@@ -10,31 +8,37 @@ namespace p5rpc.ultrawide
     /// drawn squeezed into the centred 16:9 area. Expand the cursor's x around the window centre by the inverse factor
     /// so hover/click line up with what is on screen (the game's own cursor sprite is squeezed back onto the pointer).
     ///
-    /// GetCursorPos is called from inside other mods' managed window-procedure hooks, and entering a managed hook from
-    /// there crashes the runtime (ReversePInvokeBadTransition). So the detour is a small native stub; a background
-    /// thread only updates the parameters it reads.
+    /// Only the game's own calls are redirected, by pointing P5R.exe's GetCursorPos import slot at a small native stub.
+    /// A managed detour crashes (other mods call GetCursorPos from managed WndProc hooks → ReversePInvokeBadTransition),
+    /// and an inline hook on user32 crashed on load. A background thread keeps the slot patched (in case something
+    /// rewrites it) and updates the parameters the stub reads.
     /// </summary>
     public unsafe class MouseFix
     {
-        [Function(CallingConventions.Microsoft)]
-        public delegate int GetCursorPos(int* point);
-
         [StructLayout(LayoutKind.Sequential)]
         private struct Parameters
         {
             public int Enabled;
             public float Centre;
             public float InverseRatio;
+            public int Padding;
+            public nint Original;
         }
 
         [DllImport("kernel32", CharSet = CharSet.Unicode)]
-        private static extern nint GetModuleHandleW(string name);
+        private static extern nint GetModuleHandleW(string? name);
 
         [DllImport("kernel32", CharSet = CharSet.Ansi)]
         private static extern nint GetProcAddress(nint module, string name);
 
         [DllImport("kernel32")]
         private static extern nint VirtualAlloc(nint address, nuint size, uint type, uint protect);
+
+        [DllImport("kernel32")]
+        private static extern int VirtualProtect(nint address, nuint size, uint protect, out uint oldProtect);
+
+        [DllImport("kernel32")]
+        private static extern byte RtlAddFunctionTable(nint functionTable, uint entryCount, ulong baseAddress);
 
         [DllImport("user32")]
         private static extern int GetClientRect(nint hwnd, int* rect);
@@ -44,34 +48,41 @@ namespace p5rpc.ultrawide
 
         private const uint MEM_COMMIT_RESERVE = 0x3000;
         private const uint PAGE_EXECUTE_READWRITE = 0x40;
+        private const uint PAGE_READWRITE = 0x04;
 
         private readonly Func<float> _widthRatio;
         private readonly Func<bool> _enabled;
-        private readonly IHook<GetCursorPos>? _hook;
+        private readonly Action<string> _log;
+        private readonly nint _stub;
+        private readonly nint* _slot;
         private readonly Parameters* _parameters;
         private nint _window;
 
         /// <param name="widthRatio">16:9 width divided by the current screen width (1 when not widened).</param>
-        public MouseFix(IReloadedHooks hooks, Func<float> widthRatio, Func<bool> enabled)
+        public MouseFix(Func<float> widthRatio, Func<bool> enabled, Action<string> log)
         {
             _widthRatio = widthRatio;
             _enabled = enabled;
+            _log = log;
 
-            var target = GetProcAddress(GetModuleHandleW("user32.dll"), "GetCursorPos");
-            if (target == 0)
+            _slot = FindImportSlot(GetModuleHandleW(null), "user32.dll", "GetCursorPos");
+            if (_slot == null)
+            {
+                _log("MouseFix: GetCursorPos import not found; mouse fix disabled.");
                 return;
+            }
 
             var memory = VirtualAlloc(0, 0x1000, MEM_COMMIT_RESERVE, PAGE_EXECUTE_READWRITE);
             if (memory == 0)
                 return;
 
+            _stub = memory;
             _parameters = (Parameters*)(memory + 0x800);
             *_parameters = default;
+            _parameters->Original = GetProcAddress(GetModuleHandleW("user32.dll"), "GetCursorPos");
 
-            // Create the hook first to learn the trampoline address, write the stub, then activate.
-            _hook = hooks.CreateHook<GetCursorPos>((void*)memory, target);
-            WriteStub((byte*)memory, _hook.OriginalFunctionAddress, (nint)_parameters);
-            _hook.Activate();
+            var length = WriteStub((byte*)memory, (nint)_parameters);
+            RegisterUnwindInfo(memory, length);
 
             new Thread(UpdateLoop) { IsBackground = true, Name = "p5rpc.ultrawide mouse" }.Start();
         }
@@ -80,7 +91,7 @@ namespace p5rpc.ultrawide
         /// int GetCursorPos(POINT* p):
         ///   r = original(p); if (r &amp;&amp; p &amp;&amp; enabled) p->x = round((p->x - centre) * inverseRatio + centre); return r;
         /// </summary>
-        private static void WriteStub(byte* code, nint original, nint parameters)
+        private static int WriteStub(byte* code, nint parameters)
         {
             var c = new List<byte>();
             void Emit(params byte[] bytes) => c.AddRange(bytes);
@@ -88,8 +99,8 @@ namespace p5rpc.ultrawide
 
             Emit(0x48, 0x83, 0xEC, 0x28);                   // sub rsp, 28h
             Emit(0x48, 0x89, 0x4C, 0x24, 0x30);             // mov [rsp+30h], rcx
-            Emit(0x48, 0xB8); Emit64(original);             // mov rax, original
-            Emit(0xFF, 0xD0);                               // call rax
+            Emit(0x49, 0xBA); Emit64(parameters);           // mov r10, parameters
+            Emit(0x41, 0xFF, 0x52, 0x10);                   // call [r10+10h]        (Original)
             Emit(0x48, 0x8B, 0x4C, 0x24, 0x30);             // mov rcx, [rsp+30h]
             Emit(0x85, 0xC0);                               // test eax, eax
             var jz1 = c.Count; Emit(0x74, 0x00);            // jz done
@@ -114,6 +125,81 @@ namespace p5rpc.ultrawide
 
             for (var i = 0; i < c.Count; i++)
                 code[i] = c[i];
+            return c.Count;
+        }
+
+        /// <summary>
+        /// x64 needs unwind data for any non-leaf function, otherwise exception dispatch or a stack walk passing
+        /// through the stub cannot unwind it. The stub's only prolog instruction is "sub rsp, 28h" (4 bytes).
+        /// </summary>
+        private static void RegisterUnwindInfo(nint memory, int length)
+        {
+            const int unwindInfoOffset = 0x400;
+            const int functionTableOffset = 0x600;
+
+            var unwind = (byte*)(memory + unwindInfoOffset);
+            unwind[0] = 0x01;                // version 1, no flags
+            unwind[1] = 0x04;                // size of prolog
+            unwind[2] = 0x01;                // one unwind code
+            unwind[3] = 0x00;                // no frame register
+            unwind[4] = 0x04;                // code offset: end of "sub rsp, 28h"
+            unwind[5] = (4 << 4) | 0x02;     // UWOP_ALLOC_SMALL, (0x28 - 8) / 8 = 4
+            unwind[6] = 0x00;                // padding to an even number of codes
+            unwind[7] = 0x00;
+
+            var function = (uint*)(memory + functionTableOffset);
+            function[0] = 0;                        // BeginAddress
+            function[1] = (uint)length;             // EndAddress
+            function[2] = unwindInfoOffset;         // UnwindInfoAddress
+            RtlAddFunctionTable((nint)function, 1, (ulong)memory);
+        }
+
+        /// <summary>Finds the import address table slot for dll!function in a loaded PE image.</summary>
+        private static nint* FindImportSlot(nint module, string dll, string function)
+        {
+            if (module == 0)
+                return null;
+
+            var image = (byte*)module;
+            var nt = image + *(int*)(image + 0x3C);
+            var importDirectory = *(uint*)(nt + 0x18 + 0x70 + 1 * 8);    // optional header data directory 1 (PE32+)
+            if (importDirectory == 0)
+                return null;
+
+            for (var descriptor = (uint*)(image + importDirectory); descriptor[3] != 0; descriptor += 5)
+            {
+                var name = Marshal.PtrToStringAnsi((nint)(image + descriptor[3]));
+                if (!string.Equals(name, dll, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var names = (ulong*)(image + (descriptor[0] != 0 ? descriptor[0] : descriptor[4]));
+                var slots = (nint*)(image + descriptor[4]);
+                for (var i = 0; names[i] != 0; i++)
+                {
+                    if ((names[i] & (1UL << 63)) != 0)
+                        continue;   // imported by ordinal
+                    var importName = Marshal.PtrToStringAnsi((nint)(image + (uint)names[i] + 2));
+                    if (importName == function)
+                        return &slots[i];
+                }
+            }
+            return null;
+        }
+
+        /// <summary>Points the import slot at the stub, chaining to whatever it held before.</summary>
+        private void PatchSlot()
+        {
+            var current = *_slot;
+            if (current == _stub)
+                return;
+            if (current != 0)
+                _parameters->Original = current;
+
+            if (VirtualProtect((nint)_slot, (nuint)sizeof(nint), PAGE_READWRITE, out var oldProtect) == 0)
+                return;
+            *_slot = _stub;
+            VirtualProtect((nint)_slot, (nuint)sizeof(nint), oldProtect, out _);
+            _log($"MouseFix: redirected GetCursorPos import (previous target 0x{current:X}).");
         }
 
         private void UpdateLoop()
@@ -122,9 +208,10 @@ namespace p5rpc.ultrawide
             int* origin = stackalloc int[2];
             while (true)
             {
-                Thread.Sleep(200);
                 try
                 {
+                    PatchSlot();
+
                     var ratio = _widthRatio();
                     if (_window == 0)
                         _window = Process.GetCurrentProcess().MainWindowHandle;
@@ -135,17 +222,19 @@ namespace p5rpc.ultrawide
                     if (!valid)
                     {
                         _parameters->Enabled = 0;
-                        continue;
                     }
-
-                    _parameters->Centre = origin[0] + rect[2] / 2f;
-                    _parameters->InverseRatio = 1f / ratio;
-                    _parameters->Enabled = 1;
+                    else
+                    {
+                        _parameters->Centre = origin[0] + rect[2] / 2f;
+                        _parameters->InverseRatio = 1f / ratio;
+                        _parameters->Enabled = 1;
+                    }
                 }
                 catch
                 {
                     _parameters->Enabled = 0;
                 }
+                Thread.Sleep(200);
             }
         }
     }
