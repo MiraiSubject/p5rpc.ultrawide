@@ -53,7 +53,7 @@ namespace p5rpc.ultrawide
         private readonly IHook<ImmediateRenderIndexed> _immediateRenderIndexedHook;
         private volatile int _traceRemaining;
         private int _primitiveCount, _indexedPrimitiveCount, _centeredCount;
-        private (float X, float Y)? _pendingBattleButtonGlyph;
+        private (float X, float Y, float Shift)? _pendingBattleButtonGlyph;
 
         private readonly IHook<CameraUpdate> _cameraUpdateHook;
         private readonly IHook<SetResolution> _setResolutionHook;
@@ -212,26 +212,36 @@ namespace p5rpc.ultrawide
             var tracing = _traceRemaining > 0;
             var before = tracing ? Bounds(vertices, count, stride) : default;
 
-            // The battle command labels already use the fitted UI width, but the ABXY prompts are laid out
-            // farther right at ultrawide resolutions. Move the prompt border and its following glyph together.
-            // These atlas coordinates and quad dimensions identify the four battle button borders; the small
-            // generated glyph draw immediately after each border uses the same bounds.
-            var battleGlyph = ShiftBattleButtonGlyph(vertices, count, stride, fvf);
+            // The battle command wheel calculates its sprite centres for the fitted 16:9 area already. Keep
+            // those centres while squeezing each sprite's own width so its artwork stays in proportion.
+            var battleSprite = PrepareBattleSprite(vertices, count, stride, fvf);
+            var battleCentre = battleSprite ? MidX(Bounds(vertices, count, stride)) : 0f;
 
             // Note: the UI scale global is not a usable render-to-texture signal. It reads 1.0 during normal UI
             // submission whenever mouse control is active, so every 2D draw is treated the same way.
             var action = CenterVertices(vertices, count, stride, (fvf & FvfTexCoord0) != 0);
+            if (battleSprite)
+            {
+                var delta = battleCentre - MidX(Bounds(vertices, count, stride));
+                for (var i = 0; i < count; i++)
+                    *(float*)(vertices + i * stride) += delta;
+            }
 
             if (tracing)
             {
                 _traceRemaining--;
                 var after = Bounds(vertices, count, stride);
                 Log($"trace {path} thread={Environment.CurrentManagedThreadId} n={count} stride={stride} fvf=0x{fvf:x} scale=({_uiScale[0]:0.###},{_uiScale[1]:0.###}) " +
-                    $"x={before.MinX:0.#}..{before.MaxX:0.#} y={before.MinY:0.#}..{before.MaxY:0.#} -> x={after.MinX:0.#}..{after.MaxX:0.#} {action}{(battleGlyph ? "+battle-glyph" : "")}");
+                    $"x={before.MinX:0.#}..{before.MaxX:0.#} y={before.MinY:0.#}..{before.MaxY:0.#} -> x={after.MinX:0.#}..{after.MaxX:0.#} {action}{(battleSprite ? "+battle-layout" : "")}");
             }
         }
 
-        private bool ShiftBattleButtonGlyph(nint vertices, int count, int stride, int fvf)
+        private static float MidX((float MinX, float MaxX, float MinY, float MaxY) bounds) =>
+            (bounds.MinX + bounds.MaxX) * 0.5f;
+
+        private static bool Near(float a, float b) => MathF.Abs(a - b) < 0.0002f;
+
+        private bool PrepareBattleSprite(nint vertices, int count, int stride, int fvf)
         {
             if (count != 4 || stride != 24 || (fvf & FvfTexCoord0) == 0)
             {
@@ -243,26 +253,48 @@ namespace p5rpc.ultrawide
             var width = bounds.MaxX - bounds.MinX;
             var height = bounds.MaxY - bounds.MinY;
             var uv = (float*)(vertices + 16);
-            var border = width is > 42f and < 45f && height is > 42f and < 45f &&
+            var inWheel =
                 bounds.MinX is > 250f and < 1300f && bounds.MinY is > 350f and < 950f &&
-                MathF.Abs(uv[1] - 0.0013020834f) < 0.0002f &&
-                (MathF.Abs(uv[0] - 0.0013020834f) < 0.0002f ||
-                 MathF.Abs(uv[0] - 0.10286458f) < 0.0002f ||
-                 MathF.Abs(uv[0] - 0.20442709f) < 0.0002f ||
-                 MathF.Abs(uv[0] - 0.30598959f) < 0.0002f);
+                width is > 25f and < 300f && height is > 30f and < 200f;
+            var abxy = inWheel && width is > 42f and < 45f && height is > 42f and < 45f &&
+                Near(uv[1], 0.0013020834f) &&
+                (Near(uv[0], 0.0013020834f) || Near(uv[0], 0.10286458f) ||
+                 Near(uv[0], 0.20442709f) || Near(uv[0], 0.30598959f));
+            var dpad = inWheel && width is > 61f and < 66f && height is > 61f and < 66f &&
+                Near(uv[0], 0.80208337f) && Near(uv[1], 0.13411459f);
+            var trigger = inWheel && width is > 65f and < 70f && height is > 37f and < 41f &&
+                Near(uv[0], 0.40755209f) && Near(uv[1], 0.0013020834f);
+            var pending = _pendingBattleButtonGlyph;
+            var glyph = inWheel && pending.HasValue &&
+                MathF.Abs(bounds.MinX - pending.Value.X) < 16f &&
+                MathF.Abs(bounds.MinY - pending.Value.Y) < 4f &&
+                Near(uv[0], 0.0069444445f) && Near(uv[1], 0.020833334f);
 
-            var glyph = _pendingBattleButtonGlyph is { } pending &&
-                MathF.Abs(bounds.MinX - pending.X) < 4f && MathF.Abs(bounds.MinY - pending.Y) < 4f &&
-                MathF.Abs(uv[0] - 0.0069444445f) < 0.0002f &&
-                MathF.Abs(uv[1] - 0.020833334f) < 0.0002f;
-            _pendingBattleButtonGlyph = border ? (bounds.MinX, bounds.MinY) : null;
-
-            if (!border && !glyph)
+            var shift = abxy ? BattleButtonGlyphShift : glyph ? pending!.Value.Shift : 0f;
+            _pendingBattleButtonGlyph = abxy || dpad || trigger
+                ? (bounds.MinX, bounds.MinY, abxy ? BattleButtonGlyphShift : 0f)
+                : null;
+            var artwork = inWheel && IsBattleCommandArt(uv[0], uv[1]);
+            if (!abxy && !dpad && !trigger && !glyph && !artwork)
                 return false;
             for (var i = 0; i < count; i++)
-                *(float*)(vertices + i * stride) -= BattleButtonGlyphShift;
+                *(float*)(vertices + i * stride) -= shift;
             return true;
         }
+
+        private static bool IsBattleCommandArt(float u, float v) =>
+            (Near(u, 0.34375f) && Near(v, 0.23046875f)) ||
+            (Near(u, 0.33333334f) && Near(v, 0.11848959f)) ||
+            (Near(u, 0.0013020834f) && Near(v, 0.3515625f)) ||
+            (Near(u, 0.0013020834f) && Near(v, 0.0013020834f)) ||
+            (Near(u, 0.02734375f) && Near(v, 0.11848959f)) ||
+            (Near(u, 0.0013020834f) && Near(v, 0.22395834f)) ||
+            (Near(u, 0.19270834f) && Near(v, 0.44270834f)) ||
+            (Near(u, 0.63802087f) && Near(v, 0.28515625f)) ||
+            (Near(u, 0.72265625f) && Near(v, 0.10677084f)) ||
+            (Near(u, 0.61979169f) && Near(v, 0.22786459f)) ||
+            (Near(u, 0.23046875f) && Near(v, 0.36328125f)) ||
+            (Near(u, 0.72265625f) && Near(v, 0.1640625f));
 
         private static (float MinX, float MaxX, float MinY, float MaxY) Bounds(nint vertices, int count, int stride)
         {
