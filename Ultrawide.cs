@@ -19,6 +19,7 @@ namespace p5rpc.ultrawide
         // UI space used by GFD's immediate 2D primitives (vertex positions are in these units).
         private const float VirtualWidth = 1920f;
         private const int FvfTexCoord0 = 0x100;
+        private const float MaxPinOvershoot = 64f;
 
         [Function(CallingConventions.Microsoft)]
         public delegate void FitViewport();
@@ -257,8 +258,11 @@ namespace p5rpc.ultrawide
 
             // Solid shapes that bleed off one edge of the original 16:9 screen (menu panels, bands, the quest log's
             // brush strokes) keep their edge vertices where they are, i.e. pinned to the real screen edge. Textured
-            // art is never pinned since stretching it would distort it.
-            var pinEdges = _config.ExtendEdgeArt && !textured;
+            // art is never pinned since stretching it would distort it. Only shapes ending at or just past the edge are
+            // pinned: pinning moves off-screen vertices relative to the squeezed inner ones, which skews diagonal edges.
+            // That is invisible for a panel ending a few units past the edge but makes long rays cut across other UI.
+            var overshoot = MathF.Max(-bounds.MinX, bounds.MaxX - VirtualWidth);
+            var pinEdges = _config.ExtendEdgeArt && !textured && overshoot <= MaxPinOvershoot;
 
             var ratio = Aspect16x9 / _screenAspect;
             const float centre = VirtualWidth / 2f;
