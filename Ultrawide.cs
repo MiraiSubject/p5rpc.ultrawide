@@ -158,13 +158,13 @@ namespace p5rpc.ultrawide
 
             _mouseFix = new MouseFix(
                 () => _screenAspect > Aspect16x9 ? Aspect16x9 / _screenAspect : 1f,
-                () => _config.CenterUi && _config.FixMouse,
+                () => _config.FixMouse,
                 Log);
 
             try
             {
                 _clearColorFix = new ClearColorFix(hooks,
-                    () => _config.WidenGame && _screenAspect > Aspect16x9 + 0.001f, logger);
+                    () => _screenAspect > Aspect16x9 + 0.001f, logger);
             }
             catch (Exception ex)
             {
@@ -233,7 +233,6 @@ namespace p5rpc.ultrawide
             if (_screenAspect <= Aspect16x9 + 0.001f || vertices == 0 || count <= 0 || stride < 12)
                 return;
 
-            // This follows the widened screen rather than CenterUi: the narrowing happens either way.
             if (_keyboardTextureDepth > 0)
             {
                 var widen = _screenAspect / Aspect16x9;
@@ -241,9 +240,6 @@ namespace p5rpc.ultrawide
                     *(float*)(vertices + i * stride) *= widen;
                 return;
             }
-
-            if (!_config.CenterUi)
-                return;
 
             var tracing = _traceRemaining > 0;
             var before = tracing ? Bounds(vertices, count, stride) : default;
@@ -372,7 +368,7 @@ namespace p5rpc.ultrawide
             // stars and the quest log's brush strokes has many vertices; pinning just its outer vertices distorts it.
             // Textured art is also kept in proportion. Limit pinning to shapes ending near the original screen edge.
             var overshoot = MathF.Max(-bounds.MinX, bounds.MaxX - VirtualWidth);
-            var pinEdges = _config.ExtendEdgeArt && !textured && count <= MaxPinnedVertices &&
+            var pinEdges = !textured && count <= MaxPinnedVertices &&
                 overshoot <= MaxPinOvershoot;
 
             var ratio = Aspect16x9 / _screenAspect;
@@ -400,7 +396,7 @@ namespace p5rpc.ultrawide
             }
 
             var aspect = height > 0 ? (float)width / height : Aspect16x9;
-            var screenAspect = _config.WidenGame ? Math.Max(aspect, Aspect16x9) : Aspect16x9;
+            var screenAspect = Math.Max(aspect, Aspect16x9);
             UpdateKeyboardWidthCalls(width, height);
 
             // The game truncates height * constant, so bias it by half a pixel to land exactly on the window width.
@@ -427,7 +423,7 @@ namespace p5rpc.ultrawide
         private void UpdateKeyboardWidthCalls(int width, int height)
         {
             var fitWidth = height > 0 ? Math.Min(width, (int)(height * Aspect16x9)) : width;
-            var overrideWidth = _config.WidenGame && fitWidth < width ? fitWidth : 0;
+            var overrideWidth = fitWidth < width ? fitWidth : 0;
             if (_keyboardWidthOverride == overrideWidth)
                 return;
 
@@ -448,7 +444,7 @@ namespace p5rpc.ultrawide
 
         private nint CameraUpdateImpl(nint camera, int a2)
         {
-            if (camera != 0 && _config.WidenGame)
+            if (camera != 0)
             {
                 var aspect = (float*)(camera + CameraAspectOffset);
                 var current = *aspect;

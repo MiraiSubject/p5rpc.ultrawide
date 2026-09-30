@@ -60,21 +60,6 @@ namespace p5rpc.ultrawide.Configuration
         //    ILoveIt
         //}
 
-        [DisplayName("Widen Game View")]
-        [Description("Removes the pillarboxing and widens the 3D view to the window's aspect ratio.")]
-        [DefaultValue(true)]
-        public bool WidenGame { get; set; } = true;
-
-        [DisplayName("Keep UI 16:9")]
-        [Description("Draws menus, HUD, 2D backgrounds and movies in a centred 16:9 area instead of stretching them.")]
-        [DefaultValue(true)]
-        public bool CenterUi { get; set; } = true;
-
-        [DisplayName("Extend Edge Art")]
-        [Description("Menu panels and bands that run off the edge of the 16:9 area are stretched to the screen edge instead of ending at the 16:9 boundary.")]
-        [DefaultValue(true)]
-        public bool ExtendEdgeArt { get; set; } = true;
-
         [DisplayName("Fix Mouse Position")]
         [Description("Maps the mouse onto the centred 16:9 UI so hovering and clicking line up. Makes horizontal mouse-look slightly faster.")]
         [DefaultValue(true)]
