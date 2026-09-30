@@ -46,6 +46,7 @@ namespace p5rpc.ultrawide
         private readonly IHook<ApplyScreenSettings> _applyScreenSettingsHook;
         private readonly IHook<ImmediateRender> _immediateRenderHook;
         private readonly IHook<ImmediateRenderIndexed> _immediateRenderIndexedHook;
+        private volatile int _traceRemaining;
         private int _primitiveCount, _indexedPrimitiveCount, _centeredCount, _offscreenCount;
 
         // Set when an opaque full-screen 2D quad is drawn, i.e. a menu covers the game. Edge art is only
@@ -156,7 +157,7 @@ namespace p5rpc.ultrawide
         private nint ImmediateRenderImpl(int prio, int type, int count, nint vertices, int stride, int fvf, nint a7)
         {
             _primitiveCount++;
-            TryCenterVertices(vertices, count, stride, fvf);
+            TryCenterVertices(vertices, count, stride, fvf, prio, 'P');
             return _immediateRenderHook.OriginalFunction(prio, type, count, vertices, stride, fvf, a7);
         }
 
@@ -164,31 +165,57 @@ namespace p5rpc.ultrawide
             nint vertices, int stride, int fvf, nint a10)
         {
             _indexedPrimitiveCount++;
-            TryCenterVertices(vertices, count, stride, fvf);
+            TryCenterVertices(vertices, count, stride, fvf, prio, 'I');
             return _immediateRenderIndexedHook.OriginalFunction(prio, type, count, indices, indexCount, a6, vertices, stride, fvf, a10);
         }
 
-        private void TryCenterVertices(nint vertices, int count, int stride, int fvf)
+        private void TryCenterVertices(nint vertices, int count, int stride, int fvf, int prio, char path)
         {
             if (!_config.CenterUi || _screenAspect <= Aspect16x9 + 0.001f || vertices == 0 || count <= 0 || stride < 12)
                 return;
+
+            var tracing = _traceRemaining > 0;
+            var before = tracing ? Bounds(vertices, count, stride) : default;
+            string action;
 
             // While the game renders 2D into an offscreen texture (e.g. keyboard key labels) it sets the UI scale
             // to 1.0; those coordinates are texture pixels, not screen space, so leave them alone.
             if (_uiScale[0] != _uiScale[2] || _uiScale[1] != _uiScale[3])
             {
                 _offscreenCount++;
-                return;
+                action = "offscreen";
+            }
+            else
+            {
+                action = CenterVertices(vertices, count, stride, (fvf & FvfTexCoord0) != 0, (fvf & FvfColor) != 0);
             }
 
-            CenterVertices(vertices, count, stride, (fvf & FvfTexCoord0) != 0, (fvf & FvfColor) != 0);
+            if (tracing)
+            {
+                _traceRemaining--;
+                var after = Bounds(vertices, count, stride);
+                Log($"trace {path} prio=0x{prio:x} n={count} stride={stride} fvf=0x{fvf:x} scale=({_uiScale[0]:0.###},{_uiScale[1]:0.###}) " +
+                    $"x={before.MinX:0.#}..{before.MaxX:0.#} y={before.MinY:0.#}..{before.MaxY:0.#} -> x={after.MinX:0.#}..{after.MaxX:0.#} {action}");
+            }
+        }
+
+        private static (float MinX, float MaxX, float MinY, float MaxY) Bounds(nint vertices, int count, int stride)
+        {
+            float minX = float.MaxValue, maxX = float.MinValue, minY = float.MaxValue, maxY = float.MinValue;
+            for (var i = 0; i < count; i++)
+            {
+                var p = (float*)(vertices + i * stride);
+                minX = MathF.Min(minX, p[0]); maxX = MathF.Max(maxX, p[0]);
+                minY = MathF.Min(minY, p[1]); maxY = MathF.Max(maxY, p[1]);
+            }
+            return (minX, maxX, minY, maxY);
         }
 
         /// <summary>
         /// 2D vertices are in 1920x1080 units which the shader stretches over the whole (now wider) screen.
         /// Squeeze them horizontally around the centre so the UI keeps its 16:9 shape.
         /// </summary>
-        private void CenterVertices(nint vertices, int count, int stride, bool textured, bool coloured)
+        private string CenterVertices(nint vertices, int count, int stride, bool textured, bool coloured)
         {
             var minX = float.MaxValue;
             var maxX = float.MinValue;
@@ -207,7 +234,7 @@ namespace p5rpc.ultrawide
             {
                 if (coloured && IsOpaque(vertices, count, stride))
                     _menuThisFrame = true;
-                return;
+                return "fullscreen";
             }
 
             // Full-screen images (2D backgrounds, movies) stay 16:9. In menus, anything else that bleeds off one edge
@@ -225,6 +252,7 @@ namespace p5rpc.ultrawide
                     continue;
                 *x = centre + (*x - centre) * ratio;
             }
+            return pinEdges ? "squeeze+pin" : "squeeze";
         }
 
         /// <summary>Vertex colour follows the position and is stored ABGR, so byte 0 is alpha.</summary>
@@ -308,6 +336,7 @@ namespace p5rpc.ultrawide
         private void StartDebugHotkeys()
         {
             const int VK_F9 = 0x78;
+            const int VK_F10 = 0x79;
             var thread = new Thread(() =>
             {
                 while (true)
@@ -315,6 +344,11 @@ namespace p5rpc.ultrawide
                     Thread.Sleep(100);
                     if ((GetAsyncKeyState(VK_F9) & 1) != 0)
                         DumpState("F9");
+                    if ((GetAsyncKeyState(VK_F10) & 1) != 0)
+                    {
+                        Log("F10: tracing the next 400 2D primitives");
+                        _traceRemaining = 400;
+                    }
                 }
             }) { IsBackground = true, Name = "p5rpc.ultrawide debug" };
             thread.Start();
