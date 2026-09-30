@@ -238,7 +238,19 @@ namespace p5rpc.ultrawide
             // full-screen quads, which in practice are copies of the rendered (already wide) screen used by menus and
             // transitions, so squeezing them would show a squashed copy of the game.
             if (fullWidth && (!textured || fullHeight))
+            {
+                // Some of these stop a unit short of the edge (e.g. 0..1919). Invisible at 16:9, but at 21:9 one
+                // unit is ~2 pixels and whatever is behind shows through as a thin strip, so snap them to the edge.
+                for (var i = 0; i < count; i++)
+                {
+                    var x = (float*)(vertices + i * stride);
+                    if (*x > VirtualWidth - EdgeTolerance && *x < VirtualWidth)
+                        *x = VirtualWidth;
+                    else if (*x < EdgeTolerance && *x > 0f)
+                        *x = 0f;
+                }
                 return "fullscreen";
+            }
 
             // Solid shapes that bleed off one edge of the original 16:9 screen (menu panels, bands, the quest log's
             // brush strokes) keep their edge vertices where they are, i.e. pinned to the real screen edge. Textured
