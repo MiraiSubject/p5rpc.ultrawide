@@ -1,7 +1,6 @@
 using System.Runtime.InteropServices;
 using p5rpc.ultrawide.Configuration;
 using Reloaded.Hooks.Definitions;
-using Reloaded.Hooks.Definitions.Enums;
 using Reloaded.Hooks.Definitions.X64;
 using Reloaded.Memory.Sources;
 using Reloaded.Mod.Interfaces;
@@ -20,6 +19,8 @@ namespace p5rpc.ultrawide
         private const float VirtualWidth = 1920f;
         private const int FvfTexCoord0 = 0x100;
         private const float MaxPinOvershoot = 64f;
+        private const float VirtualHeight = 1080f;
+        private const float EdgeTolerance = 2f;
 
         [Function(CallingConventions.Microsoft)]
         public delegate void FitViewport();
@@ -29,10 +30,6 @@ namespace p5rpc.ultrawide
 
         [Function(CallingConventions.Microsoft)]
         public delegate nint ImmediateRender(int prio, int type, int count, nint vertices, int stride, int fvf, nint a7);
-
-        /// <summary>gfdIm2DRenderPrimitive2D for position+colour vertices: (prio, type, vertices, count, flags).</summary>
-        [Function(CallingConventions.Microsoft)]
-        public delegate nint DrawPrimitiveG4(int prio, int type, nint vertices, int count, int flags);
 
         [Function(CallingConventions.Microsoft)]
         public delegate nint ImmediateRenderIndexed(int prio, int type, int count, nint indices, int indexCount, int a6,
@@ -54,16 +51,9 @@ namespace p5rpc.ultrawide
         private volatile int _traceRemaining;
         private int _primitiveCount, _indexedPrimitiveCount, _centeredCount, _offscreenCount;
 
-        // Render priority of the 2D draw currently being submitted, written by asm stubs at the entry of every
-        // gfdIm2D* wrapper (they all take it as their first argument).
-        private readonly int* _currentPrio;
-        private readonly List<IAsmHook> _prioHooks = new();
-        private readonly DrawPrimitiveG4? _drawPrimitiveG4;
-        private readonly nint _barVertices;
-        [ThreadStatic] private static bool _drawingBars;
-        private int _barCount;
         private readonly IHook<CameraUpdate> _cameraUpdateHook;
         private readonly IHook<SetResolution> _setResolutionHook;
+        private readonly KeyLabelFix _keyLabelFix;
 
         // Game data
         private readonly nint _aspectConstant;   // float 16/9 used when fitting the game area into the window
@@ -124,14 +114,6 @@ namespace p5rpc.ultrawide
             var immediateRenderIndexed = scanner.Find("ImmediateRenderIndexed",
                 "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 0F B6 F2 49 8B F9 BA 78 00 00 00");
 
-            // Solid-colour 2D wrapper, used to draw black side bars behind full-screen images.
-            var drawPrimitiveG4 = scanner.Find("gfdIm2DRenderPrimitive2D",
-                "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57 48 83 EC 40 F6 84 24 80 00 00 00 01 45 8B F1 49 8B F0 44 0F B6 FA 8B F9 75 ?? 41 8B D9 C1 E3 04");
-            _drawPrimitiveG4 = hooks.CreateWrapper<DrawPrimitiveG4>(drawPrimitiveG4, out _);
-            _barVertices = Marshal.AllocHGlobal(12 * 16);
-            _currentPrio = (int*)Marshal.AllocHGlobal(sizeof(int));
-            *_currentPrio = 0;
-
             Log($"FitViewport=0x{fitViewport:x} aspectConst=0x{_aspectConstant:x} window=0x{(nint)_windowSize:x} " +
                 $"display=0x{(nint)_displaySize:x} 2D=0x{(nint)_screen2DSize:x} render=0x{(nint)_renderSize:x} " +
                 $"uiScale=0x{(nint)_uiScale:x} sysConst=0x{(nint)_systemConstants:x} camera=0x{cameraUpdate:x}");
@@ -141,21 +123,12 @@ namespace p5rpc.ultrawide
             _immediateRenderHook = hooks.CreateHook<ImmediateRender>(ImmediateRenderImpl, immediateRender).Activate();
             _immediateRenderIndexedHook = hooks.CreateHook<ImmediateRenderIndexed>(ImmediateRenderIndexedImpl, immediateRenderIndexed).Activate();
 
-            var wrappers = FindCallingFunctions(scanner.BaseAddress, new[] { immediateRender, immediateRenderIndexed });
-            foreach (var wrapper in wrappers)
-            {
-                _prioHooks.Add(hooks.CreateAsmHook(new[]
-                {
-                    "use64",
-                    "push rax",
-                    "mov eax, ecx",
-                    $"mov [qword 0x{(long)_currentPrio:X}], eax",
-                    "pop rax",
-                }, wrapper, AsmHookBehaviour.ExecuteFirst).Activate());
-            }
-            Log($"Tracking 2D render priority in {wrappers.Count} wrappers");
             _cameraUpdateHook = hooks.CreateHook<CameraUpdate>(CameraUpdateImpl, cameraUpdate).Activate();
             _setResolutionHook = hooks.CreateHook<SetResolution>(SetResolutionImpl, setResolution).Activate();
+
+            _keyLabelFix = new KeyLabelFix(hooks, logger,
+                () => _screenAspect > Aspect16x9 ? Aspect16x9 / _screenAspect : 1f,
+                () => _config.CenterUi);
 
             if (_config.DebugLogging)
                 StartDebugHotkeys();
@@ -201,7 +174,7 @@ namespace p5rpc.ultrawide
 
         private void TryCenterVertices(nint vertices, int count, int stride, int fvf, int prio, char path)
         {
-            if (!_config.CenterUi || _drawingBars || _screenAspect <= Aspect16x9 + 0.001f || vertices == 0 || count <= 0 || stride < 12)
+            if (!_config.CenterUi || _screenAspect <= Aspect16x9 + 0.001f || vertices == 0 || count <= 0 || stride < 12)
                 return;
 
             var tracing = _traceRemaining > 0;
@@ -224,7 +197,7 @@ namespace p5rpc.ultrawide
             {
                 _traceRemaining--;
                 var after = Bounds(vertices, count, stride);
-                Log($"trace {path} prio={*_currentPrio} n={count} stride={stride} fvf=0x{fvf:x} scale=({_uiScale[0]:0.###},{_uiScale[1]:0.###}) " +
+                Log($"trace {path} n={count} stride={stride} fvf=0x{fvf:x} scale=({_uiScale[0]:0.###},{_uiScale[1]:0.###}) " +
                     $"x={before.MinX:0.#}..{before.MaxX:0.#} y={before.MinY:0.#}..{before.MaxY:0.#} -> x={after.MinX:0.#}..{after.MaxX:0.#} {action}");
             }
         }
@@ -248,12 +221,13 @@ namespace p5rpc.ultrawide
         private string CenterVertices(nint vertices, int count, int stride, bool textured)
         {
             var bounds = Bounds(vertices, count, stride);
-            var touchesLeft = bounds.MinX <= 0.5f;
-            var touchesRight = bounds.MaxX >= VirtualWidth - 0.5f;
-            var fullWidth = touchesLeft && touchesRight;
+            var fullWidth = bounds.MinX <= EdgeTolerance && bounds.MaxX >= VirtualWidth - EdgeTolerance;
+            var fullHeight = bounds.MinY <= EdgeTolerance && bounds.MaxY >= VirtualHeight - EdgeTolerance;
 
-            // Solid full-screen quads (fades, flashes, dimming, menu backdrops) keep covering the whole screen.
-            if (!textured && fullWidth)
+            // Full-screen quads keep covering the whole screen: solid fades, flashes and menu backdrops, and textured
+            // full-screen quads, which in practice are copies of the rendered (already wide) screen used by menus and
+            // transitions, so squeezing them would show a squashed copy of the game.
+            if (fullWidth && (!textured || fullHeight))
                 return "fullscreen";
 
             // Solid shapes that bleed off one edge of the original 16:9 screen (menu panels, bands, the quest log's
@@ -269,87 +243,13 @@ namespace p5rpc.ultrawide
             for (var i = 0; i < count; i++)
             {
                 var x = (float*)(vertices + i * stride);
-                if (pinEdges && (*x <= 0.5f || *x >= VirtualWidth - 0.5f))
+                if (pinEdges && (*x <= EdgeTolerance || *x >= VirtualWidth - EdgeTolerance))
                     continue;
                 *x = centre + (*x - centre) * ratio;
             }
             _centeredCount++;
 
-            // Full-screen images (2D backgrounds, loading screens, transitions, movies) stay 16:9 with black bars.
-            if (textured && fullWidth && bounds.MinY <= 0.5f && bounds.MaxY >= 1079.5f)
-            {
-                DrawSideBars(ratio);
-                return "image+bars";
-            }
             return pinEdges ? "squeeze+pin" : "squeeze";
-        }
-
-        private void DrawSideBars(float ratio)
-        {
-            if (!_config.PillarboxImages || _drawPrimitiveG4 == null)
-                return;
-
-            var inner = VirtualWidth / 2f * (1f - ratio);
-            var v = (float*)_barVertices;
-            WriteQuad(ref v, -8f, inner);
-            WriteQuad(ref v, VirtualWidth - inner, VirtualWidth + 8f);
-
-            _drawingBars = true;
-            try
-            {
-                const int TriangleList = 3;
-                _drawPrimitiveG4(*_currentPrio, TriangleList, _barVertices, 12, 0);
-                _barCount++;
-            }
-            finally
-            {
-                _drawingBars = false;
-            }
-        }
-
-        /// <summary>Two triangles of opaque black position+colour vertices (colour is ABGR, alpha in byte 0).</summary>
-        private static void WriteQuad(ref float* v, float left, float right)
-        {
-            const float top = -8f, bottom = 1088f;
-            ReadOnlySpan<float> corners = stackalloc float[]
-            {
-                left, top, right, top, left, bottom,
-                right, top, right, bottom, left, bottom,
-            };
-            for (var i = 0; i < corners.Length; i += 2)
-            {
-                v[0] = corners[i];
-                v[1] = corners[i + 1];
-                v[2] = 0f;
-                *(uint*)(v + 3) = 0x000000FF;
-                v += 4;
-            }
-        }
-
-        /// <summary>Finds the functions that directly call any of the targets (rel32 call), by walking back to int3 padding.</summary>
-        private static List<nint> FindCallingFunctions(nint moduleBase, nint[] targets)
-        {
-            var module = System.Diagnostics.Process.GetCurrentProcess().MainModule!;
-            var size = module.ModuleMemorySize;
-            var code = (byte*)moduleBase;
-            var result = new HashSet<nint>();
-            for (var i = 0; i < size - 5; i++)
-            {
-                if (code[i] != 0xE8)
-                    continue;
-                var target = moduleBase + i + 5 + *(int*)(code + i + 1);
-                if (Array.IndexOf(targets, target) < 0)
-                    continue;
-                for (var back = i; back > i - 0x800 && back > 1; back--)
-                {
-                    if (code[back - 1] == 0xCC && code[back - 2] == 0xCC)
-                    {
-                        result.Add(moduleBase + back);
-                        break;
-                    }
-                }
-            }
-            return result.ToList();
         }
 
         private bool UpdateAspectConstant()
@@ -409,7 +309,7 @@ namespace p5rpc.ultrawide
         {
             var sys = *_systemConstants;
             var scale2D = sys != 0 ? $"({((float*)(sys + 0x20))[0]:0.####}, {((float*)(sys + 0x20))[1]:0.####}, {((float*)(sys + 0x20))[2]:0.####})" : "n/a";
-            Log($"{reason}: primitives={_primitiveCount} indexed={_indexedPrimitiveCount} centered={_centeredCount} offscreen={_offscreenCount} bars={_barCount} aspect={_screenAspect:0.####} const={*(float*)_aspectConstant:0.####} " +
+            Log($"{reason}: primitives={_primitiveCount} indexed={_indexedPrimitiveCount} centered={_centeredCount} offscreen={_offscreenCount} aspect={_screenAspect:0.####} const={*(float*)_aspectConstant:0.####} " +
                 $"window=[{_windowSize[0]},{_windowSize[1]},{_windowSize[2]},{_windowSize[3]}] " +
                 $"display={_displaySize[0]}x{_displaySize[1]} renderFit={_displaySize[2]}x{_displaySize[3]} " +
                 $"2D={_screen2DSize[0]}x{_screen2DSize[1]} render={_renderSize[0]}x{_renderSize[1]} " +
