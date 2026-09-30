@@ -75,6 +75,11 @@ namespace p5rpc.ultrawide.Configuration
         [DefaultValue(true)]
         public bool ExtendEdgeArt { get; set; } = true;
 
+        [DisplayName("Pillarbox Full-screen Images")]
+        [Description("Draws black bars beside full-screen 2D images (loading screens, transitions, 2D backgrounds) kept at 16:9.")]
+        [DefaultValue(true)]
+        public bool PillarboxImages { get; set; } = true;
+
         [DisplayName("Enable Resolution Override")]
         [Description("Forces a resolution.")]
         [DefaultValue(false)]
