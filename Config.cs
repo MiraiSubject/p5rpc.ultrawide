@@ -75,6 +75,11 @@ namespace p5rpc.ultrawide.Configuration
         [DefaultValue(true)]
         public bool ExtendEdgeArt { get; set; } = true;
 
+        [DisplayName("Fix Mouse Position")]
+        [Description("Maps the mouse onto the centred 16:9 UI so hovering and clicking line up. Makes horizontal mouse-look slightly faster.")]
+        [DefaultValue(true)]
+        public bool FixMouse { get; set; } = true;
+
         [DisplayName("Enable Resolution Override")]
         [Description("Forces a resolution.")]
         [DefaultValue(false)]

@@ -55,6 +55,7 @@ namespace p5rpc.ultrawide
         private readonly IHook<CameraUpdate> _cameraUpdateHook;
         private readonly IHook<SetResolution> _setResolutionHook;
         private readonly KeyLabelFix _keyLabelFix;
+        private readonly MouseFix _mouseFix;
 
         // Game data
         private readonly nint _aspectConstant;   // float 16/9 used when fitting the game area into the window
@@ -130,6 +131,10 @@ namespace p5rpc.ultrawide
             _keyLabelFix = new KeyLabelFix(hooks, logger,
                 () => _screenAspect > Aspect16x9 ? Aspect16x9 / _screenAspect : 1f,
                 () => _config.CenterUi);
+
+            _mouseFix = new MouseFix(hooks,
+                () => _screenAspect > Aspect16x9 ? Aspect16x9 / _screenAspect : 1f,
+                () => _config.CenterUi && _config.FixMouse);
 
             if (_config.DebugLogging)
                 StartDebugHotkeys();
