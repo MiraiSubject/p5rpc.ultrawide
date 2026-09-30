@@ -17,6 +17,7 @@ namespace p5rpc.ultrawide
 
         // UI space used by GFD's immediate 2D primitives (vertex positions are in these units).
         private const float VirtualWidth = 1920f;
+        private const int FvfColor = 0x40;
         private const int FvfTexCoord0 = 0x100;
 
         [Function(CallingConventions.Microsoft)]
@@ -45,7 +46,11 @@ namespace p5rpc.ultrawide
         private readonly IHook<ApplyScreenSettings> _applyScreenSettingsHook;
         private readonly IHook<ImmediateRender> _immediateRenderHook;
         private readonly IHook<ImmediateRenderIndexed> _immediateRenderIndexedHook;
-        private int _primitiveCount, _indexedPrimitiveCount, _centeredCount;
+        private int _primitiveCount, _indexedPrimitiveCount, _centeredCount, _offscreenCount;
+
+        // Set when an opaque full-screen 2D quad is drawn, i.e. a menu covers the game. Edge art is only
+        // extended to the screen sides in that case; over live gameplay the HUD stays inside 16:9.
+        private bool _menuThisFrame, _menuLastFrame;
         private readonly IHook<CameraUpdate> _cameraUpdateHook;
         private readonly IHook<SetResolution> _setResolutionHook;
 
@@ -140,6 +145,8 @@ namespace p5rpc.ultrawide
         // Runs every frame, so only touch the constant and log when the window aspect changes.
         private void ApplyScreenSettingsImpl()
         {
+            _menuLastFrame = _menuThisFrame;
+            _menuThisFrame = false;
             var changed = UpdateAspectConstant();
             _applyScreenSettingsHook.OriginalFunction();
             if (changed && _config.DebugLogging)
@@ -163,15 +170,25 @@ namespace p5rpc.ultrawide
 
         private void TryCenterVertices(nint vertices, int count, int stride, int fvf)
         {
-            if (_config.CenterUi && _screenAspect > Aspect16x9 + 0.001f && vertices != 0 && count > 0 && stride >= 12)
-                CenterVertices(vertices, count, stride, (fvf & FvfTexCoord0) != 0);
+            if (!_config.CenterUi || _screenAspect <= Aspect16x9 + 0.001f || vertices == 0 || count <= 0 || stride < 12)
+                return;
+
+            // While the game renders 2D into an offscreen texture (e.g. keyboard key labels) it sets the UI scale
+            // to 1.0; those coordinates are texture pixels, not screen space, so leave them alone.
+            if (_uiScale[0] != _uiScale[2] || _uiScale[1] != _uiScale[3])
+            {
+                _offscreenCount++;
+                return;
+            }
+
+            CenterVertices(vertices, count, stride, (fvf & FvfTexCoord0) != 0, (fvf & FvfColor) != 0);
         }
 
         /// <summary>
         /// 2D vertices are in 1920x1080 units which the shader stretches over the whole (now wider) screen.
         /// Squeeze them horizontally around the centre so the UI keeps its 16:9 shape.
         /// </summary>
-        private void CenterVertices(nint vertices, int count, int stride, bool textured)
+        private void CenterVertices(nint vertices, int count, int stride, bool textured, bool coloured)
         {
             var minX = float.MaxValue;
             var maxX = float.MinValue;
@@ -185,14 +202,18 @@ namespace p5rpc.ultrawide
             var touchesLeft = minX <= 0.5f;
             var touchesRight = maxX >= VirtualWidth - 0.5f;
 
-            // Solid full-screen quads (fades, flashes, dimming) should keep covering the whole screen.
+            // Solid full-screen quads (fades, flashes, dimming, menu backdrops) keep covering the whole screen.
             if (!textured && touchesLeft && touchesRight)
+            {
+                if (coloured && IsOpaque(vertices, count, stride))
+                    _menuThisFrame = true;
                 return;
+            }
 
-            // Full-screen images (2D backgrounds, movies) stay 16:9. Anything else that bleeds off one edge of the
-            // original 16:9 screen keeps its edge vertices where they are, i.e. pinned to the real screen edge, so
-            // menu panels and bands reach the sides instead of ending in a hard line at the 16:9 boundary.
-            var pinEdges = _config.ExtendEdgeArt && !(touchesLeft && touchesRight);
+            // Full-screen images (2D backgrounds, movies) stay 16:9. In menus, anything else that bleeds off one edge
+            // of the original 16:9 screen keeps its edge vertices where they are, i.e. pinned to the real screen edge,
+            // so panels and bands reach the sides instead of ending in a hard line at the 16:9 boundary.
+            var pinEdges = _config.ExtendEdgeArt && (_menuThisFrame || _menuLastFrame) && !(touchesLeft && touchesRight);
 
             _centeredCount++;
             var ratio = Aspect16x9 / _screenAspect;
@@ -204,6 +225,17 @@ namespace p5rpc.ultrawide
                     continue;
                 *x = centre + (*x - centre) * ratio;
             }
+        }
+
+        /// <summary>Vertex colour follows the position and is stored ABGR, so byte 0 is alpha.</summary>
+        private static bool IsOpaque(nint vertices, int count, int stride)
+        {
+            for (var i = 0; i < count; i++)
+            {
+                if (*(byte*)(vertices + i * stride + 12) < 250)
+                    return false;
+            }
+            return true;
         }
 
         private bool UpdateAspectConstant()
@@ -263,7 +295,7 @@ namespace p5rpc.ultrawide
         {
             var sys = *_systemConstants;
             var scale2D = sys != 0 ? $"({((float*)(sys + 0x20))[0]:0.####}, {((float*)(sys + 0x20))[1]:0.####}, {((float*)(sys + 0x20))[2]:0.####})" : "n/a";
-            Log($"{reason}: primitives={_primitiveCount} indexed={_indexedPrimitiveCount} centered={_centeredCount} aspect={_screenAspect:0.####} const={*(float*)_aspectConstant:0.####} " +
+            Log($"{reason}: primitives={_primitiveCount} indexed={_indexedPrimitiveCount} centered={_centeredCount} offscreen={_offscreenCount} menu={_menuLastFrame} aspect={_screenAspect:0.####} const={*(float*)_aspectConstant:0.####} " +
                 $"window=[{_windowSize[0]},{_windowSize[1]},{_windowSize[2]},{_windowSize[3]}] " +
                 $"display={_displaySize[0]}x{_displaySize[1]} renderFit={_displaySize[2]}x{_displaySize[3]} " +
                 $"2D={_screen2DSize[0]}x{_screen2DSize[1]} render={_renderSize[0]}x{_renderSize[1]} " +
