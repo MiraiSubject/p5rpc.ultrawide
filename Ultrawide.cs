@@ -56,6 +56,7 @@ namespace p5rpc.ultrawide
         private readonly IHook<CameraUpdate> _cameraUpdateHook;
         private readonly IHook<SetResolution> _setResolutionHook;
         private readonly MouseFix _mouseFix;
+        private readonly ClearColorFix? _clearColorFix;
 
         // Game data
         private readonly nint _aspectConstant;   // float 16/9 used when fitting the game area into the window
@@ -148,6 +149,16 @@ namespace p5rpc.ultrawide
                 () => _screenAspect > Aspect16x9 ? Aspect16x9 / _screenAspect : 1f,
                 () => _config.CenterUi && _config.FixMouse,
                 Log);
+
+            try
+            {
+                _clearColorFix = new ClearColorFix(hooks,
+                    () => _config.WidenGame && _screenAspect > Aspect16x9 + 0.001f, logger);
+            }
+            catch (Exception ex)
+            {
+                Log($"Neutral clear fix unavailable: {ex.Message}");
+            }
 
             if (_config.DebugLogging)
                 StartDebugHotkeys();
