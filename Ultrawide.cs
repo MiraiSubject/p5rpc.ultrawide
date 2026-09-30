@@ -54,7 +54,6 @@ namespace p5rpc.ultrawide
 
         private readonly IHook<CameraUpdate> _cameraUpdateHook;
         private readonly IHook<SetResolution> _setResolutionHook;
-        private readonly KeyLabelFix _keyLabelFix;
         private readonly MouseFix _mouseFix;
 
         // Game data
@@ -127,10 +126,6 @@ namespace p5rpc.ultrawide
 
             _cameraUpdateHook = hooks.CreateHook<CameraUpdate>(CameraUpdateImpl, cameraUpdate).Activate();
             _setResolutionHook = hooks.CreateHook<SetResolution>(SetResolutionImpl, setResolution).Activate();
-
-            _keyLabelFix = new KeyLabelFix(hooks, logger,
-                () => _screenAspect > Aspect16x9 ? Aspect16x9 / _screenAspect : 1f,
-                () => _config.CenterUi);
 
             _mouseFix = new MouseFix(hooks,
                 () => _screenAspect > Aspect16x9 ? Aspect16x9 / _screenAspect : 1f,
