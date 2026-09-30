@@ -29,6 +29,10 @@ namespace p5rpc.ultrawide
         public delegate nint ImmediateRender(int prio, int type, int count, nint vertices, int stride, int fvf, nint a7);
 
         [Function(CallingConventions.Microsoft)]
+        public delegate nint ImmediateRenderIndexed(int prio, int type, int count, nint indices, int indexCount, int a6,
+            nint vertices, int stride, int fvf, nint a10);
+
+        [Function(CallingConventions.Microsoft)]
         public delegate nint CameraUpdate(nint camera, int a2);
 
         [Function(CallingConventions.Microsoft)]
@@ -40,6 +44,8 @@ namespace p5rpc.ultrawide
         private readonly IHook<FitViewport> _fitViewportHook;
         private readonly IHook<ApplyScreenSettings> _applyScreenSettingsHook;
         private readonly IHook<ImmediateRender> _immediateRenderHook;
+        private readonly IHook<ImmediateRenderIndexed> _immediateRenderIndexedHook;
+        private int _primitiveCount, _indexedPrimitiveCount, _centeredCount;
         private readonly IHook<CameraUpdate> _cameraUpdateHook;
         private readonly IHook<SetResolution> _setResolutionHook;
 
@@ -98,6 +104,10 @@ namespace p5rpc.ultrawide
             var immediateRender = scanner.Find("ImmediateRender",
                 "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20 48 8B 35 ?? ?? ?? ?? 4D 8B F1 41 8B D8 0F B6 EA");
 
+            // gfdDevCmdMakeImmediateRenderIndexedPrimitivePkt: indexed variant used for textured sprites.
+            var immediateRenderIndexed = scanner.Find("ImmediateRenderIndexed",
+                "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 0F B6 F2 49 8B F9 BA 78 00 00 00");
+
             Log($"FitViewport=0x{fitViewport:x} aspectConst=0x{_aspectConstant:x} window=0x{(nint)_windowSize:x} " +
                 $"display=0x{(nint)_displaySize:x} 2D=0x{(nint)_screen2DSize:x} render=0x{(nint)_renderSize:x} " +
                 $"uiScale=0x{(nint)_uiScale:x} sysConst=0x{(nint)_systemConstants:x} camera=0x{cameraUpdate:x}");
@@ -105,6 +115,7 @@ namespace p5rpc.ultrawide
             _fitViewportHook = hooks.CreateHook<FitViewport>(FitViewportImpl, fitViewport).Activate();
             _applyScreenSettingsHook = hooks.CreateHook<ApplyScreenSettings>(ApplyScreenSettingsImpl, applyScreenSettings).Activate();
             _immediateRenderHook = hooks.CreateHook<ImmediateRender>(ImmediateRenderImpl, immediateRender).Activate();
+            _immediateRenderIndexedHook = hooks.CreateHook<ImmediateRenderIndexed>(ImmediateRenderIndexedImpl, immediateRenderIndexed).Activate();
             _cameraUpdateHook = hooks.CreateHook<CameraUpdate>(CameraUpdateImpl, cameraUpdate).Activate();
             _setResolutionHook = hooks.CreateHook<SetResolution>(SetResolutionImpl, setResolution).Activate();
 
@@ -120,25 +131,40 @@ namespace p5rpc.ultrawide
 
         private void FitViewportImpl()
         {
-            UpdateAspectConstant();
+            var changed = UpdateAspectConstant();
             _fitViewportHook.OriginalFunction();
-            if (_config.DebugLogging)
+            if (changed && _config.DebugLogging)
                 DumpState("FitViewport");
         }
 
+        // Runs every frame, so only touch the constant and log when the window aspect changes.
         private void ApplyScreenSettingsImpl()
         {
-            UpdateAspectConstant();
+            var changed = UpdateAspectConstant();
             _applyScreenSettingsHook.OriginalFunction();
-            if (_config.DebugLogging)
+            if (changed && _config.DebugLogging)
                 DumpState("ApplyScreenSettings");
         }
 
         private nint ImmediateRenderImpl(int prio, int type, int count, nint vertices, int stride, int fvf, nint a7)
         {
+            _primitiveCount++;
+            TryCenterVertices(vertices, count, stride, fvf);
+            return _immediateRenderHook.OriginalFunction(prio, type, count, vertices, stride, fvf, a7);
+        }
+
+        private nint ImmediateRenderIndexedImpl(int prio, int type, int count, nint indices, int indexCount, int a6,
+            nint vertices, int stride, int fvf, nint a10)
+        {
+            _indexedPrimitiveCount++;
+            TryCenterVertices(vertices, count, stride, fvf);
+            return _immediateRenderIndexedHook.OriginalFunction(prio, type, count, indices, indexCount, a6, vertices, stride, fvf, a10);
+        }
+
+        private void TryCenterVertices(nint vertices, int count, int stride, int fvf)
+        {
             if (_config.CenterUi && _screenAspect > Aspect16x9 + 0.001f && vertices != 0 && count > 0 && stride >= 12)
                 CenterVertices(vertices, count, stride, (fvf & FvfTexCoord0) != 0);
-            return _immediateRenderHook.OriginalFunction(prio, type, count, vertices, stride, fvf, a7);
         }
 
         /// <summary>
@@ -160,6 +186,7 @@ namespace p5rpc.ultrawide
             if (!textured && minX <= 0.5f && maxX >= VirtualWidth - 0.5f)
                 return;
 
+            _centeredCount++;
             var ratio = Aspect16x9 / _screenAspect;
             const float centre = VirtualWidth / 2f;
             for (var i = 0; i < count; i++)
@@ -169,7 +196,7 @@ namespace p5rpc.ultrawide
             }
         }
 
-        private void UpdateAspectConstant()
+        private bool UpdateAspectConstant()
         {
             var width = _windowSize[0];
             var height = _windowSize[1];
@@ -180,11 +207,16 @@ namespace p5rpc.ultrawide
             }
 
             var aspect = height > 0 ? (float)width / height : Aspect16x9;
-            _screenAspect = _config.WidenGame ? Math.Max(aspect, Aspect16x9) : Aspect16x9;
+            var screenAspect = _config.WidenGame ? Math.Max(aspect, Aspect16x9) : Aspect16x9;
 
             // The game truncates height * constant, so bias it by half a pixel to land exactly on the window width.
-            var constant = _screenAspect > Aspect16x9 ? (width + 0.5f) / height : Aspect16x9;
+            var constant = screenAspect > Aspect16x9 ? (width + 0.5f) / height : Aspect16x9;
+            if (screenAspect == _screenAspect && *(float*)_aspectConstant == constant)
+                return false;
+
+            _screenAspect = screenAspect;
             Memory.Instance.SafeWrite((nuint)_aspectConstant, constant);
+            return true;
         }
 
         private nint CameraUpdateImpl(nint camera, int a2)
@@ -221,7 +253,7 @@ namespace p5rpc.ultrawide
         {
             var sys = *_systemConstants;
             var scale2D = sys != 0 ? $"({((float*)(sys + 0x20))[0]:0.####}, {((float*)(sys + 0x20))[1]:0.####}, {((float*)(sys + 0x20))[2]:0.####})" : "n/a";
-            Log($"{reason}: aspect={_screenAspect:0.####} const={*(float*)_aspectConstant:0.####} " +
+            Log($"{reason}: primitives={_primitiveCount} indexed={_indexedPrimitiveCount} centered={_centeredCount} aspect={_screenAspect:0.####} const={*(float*)_aspectConstant:0.####} " +
                 $"window=[{_windowSize[0]},{_windowSize[1]},{_windowSize[2]},{_windowSize[3]}] " +
                 $"display={_displaySize[0]}x{_displaySize[1]} renderFit={_displaySize[2]}x{_displaySize[3]} " +
                 $"2D={_screen2DSize[0]}x{_screen2DSize[1]} render={_renderSize[0]}x{_renderSize[1]} " +
