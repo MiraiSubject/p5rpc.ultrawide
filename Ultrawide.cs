@@ -215,11 +215,12 @@ namespace p5rpc.ultrawide
             var bounds = Bounds(vertices, count, stride);
             var fullWidth = bounds.MinX <= EdgeTolerance && bounds.MaxX >= VirtualWidth - EdgeTolerance;
             var fullHeight = bounds.MinY <= EdgeTolerance && bounds.MaxY >= VirtualHeight - EdgeTolerance;
+            var screenCopy = bounds.MinX >= -EdgeTolerance && bounds.MaxX <= VirtualWidth + EdgeTolerance &&
+                bounds.MinY >= -EdgeTolerance && bounds.MaxY <= VirtualHeight + EdgeTolerance;
 
-            // Full-screen quads keep covering the whole screen: solid fades, flashes and menu backdrops, and textured
-            // full-screen quads, which in practice are copies of the rendered (already wide) screen used by menus and
-            // transitions, so squeezing them would show a squashed copy of the game.
-            if (fullWidth && (!textured || fullHeight))
+            // Solid fades/panels and exact 1920x1080 textured screen copies stay wide. Some menu artwork is a
+            // 2048x1536 textured quad that also spans the screen; it must be squeezed to preserve its proportions.
+            if (fullWidth && (!textured || (fullHeight && screenCopy)))
             {
                 // Some of these stop a unit short of the edge (e.g. 0..1919). Invisible at 16:9, but at 21:9 one
                 // unit is ~2 pixels and whatever is behind shows through as a thin strip, so snap them to the edge.
