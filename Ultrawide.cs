@@ -21,7 +21,6 @@ namespace p5rpc.ultrawide
         private const float MaxPinOvershoot = 64f;
         private const float VirtualHeight = 1080f;
         private const float EdgeTolerance = 2f;
-        private const float MaxOffscreenSize = 512f;
 
         [Function(CallingConventions.Microsoft)]
         public delegate void FitViewport();
@@ -50,7 +49,7 @@ namespace p5rpc.ultrawide
         private readonly IHook<ImmediateRender> _immediateRenderHook;
         private readonly IHook<ImmediateRenderIndexed> _immediateRenderIndexedHook;
         private volatile int _traceRemaining;
-        private int _primitiveCount, _indexedPrimitiveCount, _centeredCount, _offscreenCount;
+        private int _primitiveCount, _indexedPrimitiveCount, _centeredCount;
 
         private readonly IHook<CameraUpdate> _cameraUpdateHook;
         private readonly IHook<SetResolution> _setResolutionHook;
@@ -179,24 +178,11 @@ namespace p5rpc.ultrawide
                 return;
 
             var tracing = _traceRemaining > 0;
-            var before = Bounds(vertices, count, stride);
-            string action;
+            var before = tracing ? Bounds(vertices, count, stride) : default;
 
-            // Render-to-texture passes (e.g. keyboard key labels) set the UI scale to 1.0 and draw in texture pixels,
-            // which must not be squeezed. That scale is a global switched by render pass callbacks, so it can still
-            // read 1.0 while normal UI is submitted (it does whenever mouse control is active); only treat small
-            // texture-sized draws near the origin as offscreen.
-            var scaleOverridden = _uiScale[0] == 1f && _uiScale[1] == 1f && (_uiScale[2] != 1f || _uiScale[3] != 1f);
-            if (scaleOverridden && before.MinX >= -EdgeTolerance && before.MinY >= -EdgeTolerance &&
-                before.MaxX <= MaxOffscreenSize && before.MaxY <= MaxOffscreenSize)
-            {
-                _offscreenCount++;
-                action = "offscreen";
-            }
-            else
-            {
-                action = CenterVertices(vertices, count, stride, (fvf & FvfTexCoord0) != 0);
-            }
+            // Note: the UI scale global is not a usable render-to-texture signal. It reads 1.0 during normal UI
+            // submission whenever mouse control is active, so every 2D draw is treated the same way.
+            var action = CenterVertices(vertices, count, stride, (fvf & FvfTexCoord0) != 0);
 
             if (tracing)
             {
@@ -326,7 +312,7 @@ namespace p5rpc.ultrawide
         {
             var sys = *_systemConstants;
             var scale2D = sys != 0 ? $"({((float*)(sys + 0x20))[0]:0.####}, {((float*)(sys + 0x20))[1]:0.####}, {((float*)(sys + 0x20))[2]:0.####})" : "n/a";
-            Log($"{reason}: primitives={_primitiveCount} indexed={_indexedPrimitiveCount} centered={_centeredCount} offscreen={_offscreenCount} aspect={_screenAspect:0.####} const={*(float*)_aspectConstant:0.####} " +
+            Log($"{reason}: primitives={_primitiveCount} indexed={_indexedPrimitiveCount} centered={_centeredCount} aspect={_screenAspect:0.####} const={*(float*)_aspectConstant:0.####} " +
                 $"window=[{_windowSize[0]},{_windowSize[1]},{_windowSize[2]},{_windowSize[3]}] " +
                 $"display={_displaySize[0]}x{_displaySize[1]} renderFit={_displaySize[2]}x{_displaySize[3]} " +
                 $"2D={_screen2DSize[0]}x{_screen2DSize[1]} render={_renderSize[0]}x{_renderSize[1]} " +
