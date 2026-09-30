@@ -182,9 +182,17 @@ namespace p5rpc.ultrawide
                 if (x > maxX) maxX = x;
             }
 
+            var touchesLeft = minX <= 0.5f;
+            var touchesRight = maxX >= VirtualWidth - 0.5f;
+
             // Solid full-screen quads (fades, flashes, dimming) should keep covering the whole screen.
-            if (!textured && minX <= 0.5f && maxX >= VirtualWidth - 0.5f)
+            if (!textured && touchesLeft && touchesRight)
                 return;
+
+            // Full-screen images (2D backgrounds, movies) stay 16:9. Anything else that bleeds off one edge of the
+            // original 16:9 screen keeps its edge vertices where they are, i.e. pinned to the real screen edge, so
+            // menu panels and bands reach the sides instead of ending in a hard line at the 16:9 boundary.
+            var pinEdges = _config.ExtendEdgeArt && !(touchesLeft && touchesRight);
 
             _centeredCount++;
             var ratio = Aspect16x9 / _screenAspect;
@@ -192,6 +200,8 @@ namespace p5rpc.ultrawide
             for (var i = 0; i < count; i++)
             {
                 var x = (float*)(vertices + i * stride);
+                if (pinEdges && (*x <= 0.5f || *x >= VirtualWidth - 0.5f))
+                    continue;
                 *x = centre + (*x - centre) * ratio;
             }
         }

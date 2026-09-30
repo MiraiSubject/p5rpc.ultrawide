@@ -70,6 +70,11 @@ namespace p5rpc.ultrawide.Configuration
         [DefaultValue(true)]
         public bool CenterUi { get; set; } = true;
 
+        [DisplayName("Extend Edge Art")]
+        [Description("Menu panels and bands that run off the edge of the 16:9 area are stretched to the screen edge instead of ending at the 16:9 boundary.")]
+        [DefaultValue(true)]
+        public bool ExtendEdgeArt { get; set; } = true;
+
         [DisplayName("Enable Resolution Override")]
         [Description("Forces a resolution.")]
         [DefaultValue(false)]
