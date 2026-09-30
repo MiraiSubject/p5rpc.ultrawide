@@ -22,6 +22,7 @@ namespace p5rpc.ultrawide
         private const float VirtualHeight = 1080f;
         private const float EdgeTolerance = 2f;
         private const float ScreenCopyOvershoot = 16f;
+        private const int MaxPinnedVertices = 6;
 
         [Function(CallingConventions.Microsoft)]
         public delegate void FitViewport();
@@ -252,13 +253,12 @@ namespace p5rpc.ultrawide
                 return "fullscreen";
             }
 
-            // Solid shapes that bleed off one edge of the original 16:9 screen (menu panels, bands, the quest log's
-            // brush strokes) keep their edge vertices where they are, i.e. pinned to the real screen edge. Textured
-            // art is never pinned since stretching it would distort it. Only shapes ending at or just past the edge are
-            // pinned: pinning moves off-screen vertices relative to the squeezed inner ones, which skews diagonal edges.
-            // That is invisible for a panel ending a few units past the edge but makes long rays cut across other UI.
+            // Only simple solid panels may extend to the real screen edge. Detailed vector art such as the menu's
+            // stars and the quest log's brush strokes has many vertices; pinning just its outer vertices distorts it.
+            // Textured art is also kept in proportion. Limit pinning to shapes ending near the original screen edge.
             var overshoot = MathF.Max(-bounds.MinX, bounds.MaxX - VirtualWidth);
-            var pinEdges = _config.ExtendEdgeArt && !textured && overshoot <= MaxPinOvershoot;
+            var pinEdges = _config.ExtendEdgeArt && !textured && count <= MaxPinnedVertices &&
+                overshoot <= MaxPinOvershoot;
 
             var ratio = Aspect16x9 / _screenAspect;
             const float centre = VirtualWidth / 2f;
