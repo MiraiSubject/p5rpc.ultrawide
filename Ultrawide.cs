@@ -23,6 +23,7 @@ namespace p5rpc.ultrawide
         private const float EdgeTolerance = 2f;
         private const float ScreenCopyOvershoot = 16f;
         private const int MaxPinnedVertices = 6;
+        private const float BattleButtonGlyphShift = 28f;
 
         [Function(CallingConventions.Microsoft)]
         public delegate void FitViewport();
@@ -52,6 +53,7 @@ namespace p5rpc.ultrawide
         private readonly IHook<ImmediateRenderIndexed> _immediateRenderIndexedHook;
         private volatile int _traceRemaining;
         private int _primitiveCount, _indexedPrimitiveCount, _centeredCount;
+        private (float X, float Y)? _pendingBattleButtonGlyph;
 
         private readonly IHook<CameraUpdate> _cameraUpdateHook;
         private readonly IHook<SetResolution> _setResolutionHook;
@@ -210,6 +212,12 @@ namespace p5rpc.ultrawide
             var tracing = _traceRemaining > 0;
             var before = tracing ? Bounds(vertices, count, stride) : default;
 
+            // The battle command labels already use the fitted UI width, but the ABXY prompts are laid out
+            // farther right at ultrawide resolutions. Move the prompt border and its following glyph together.
+            // These atlas coordinates and quad dimensions identify the four battle button borders; the small
+            // generated glyph draw immediately after each border uses the same bounds.
+            var battleGlyph = ShiftBattleButtonGlyph(vertices, count, stride, fvf);
+
             // Note: the UI scale global is not a usable render-to-texture signal. It reads 1.0 during normal UI
             // submission whenever mouse control is active, so every 2D draw is treated the same way.
             var action = CenterVertices(vertices, count, stride, (fvf & FvfTexCoord0) != 0);
@@ -219,8 +227,41 @@ namespace p5rpc.ultrawide
                 _traceRemaining--;
                 var after = Bounds(vertices, count, stride);
                 Log($"trace {path} thread={Environment.CurrentManagedThreadId} n={count} stride={stride} fvf=0x{fvf:x} scale=({_uiScale[0]:0.###},{_uiScale[1]:0.###}) " +
-                    $"x={before.MinX:0.#}..{before.MaxX:0.#} y={before.MinY:0.#}..{before.MaxY:0.#} -> x={after.MinX:0.#}..{after.MaxX:0.#} {action}");
+                    $"x={before.MinX:0.#}..{before.MaxX:0.#} y={before.MinY:0.#}..{before.MaxY:0.#} -> x={after.MinX:0.#}..{after.MaxX:0.#} {action}{(battleGlyph ? "+battle-glyph" : "")}");
             }
+        }
+
+        private bool ShiftBattleButtonGlyph(nint vertices, int count, int stride, int fvf)
+        {
+            if (count != 4 || stride != 24 || (fvf & FvfTexCoord0) == 0)
+            {
+                _pendingBattleButtonGlyph = null;
+                return false;
+            }
+
+            var bounds = Bounds(vertices, count, stride);
+            var width = bounds.MaxX - bounds.MinX;
+            var height = bounds.MaxY - bounds.MinY;
+            var uv = (float*)(vertices + 16);
+            var border = width is > 42f and < 45f && height is > 42f and < 45f &&
+                bounds.MinX is > 250f and < 1300f && bounds.MinY is > 350f and < 950f &&
+                MathF.Abs(uv[1] - 0.0013020834f) < 0.0002f &&
+                (MathF.Abs(uv[0] - 0.0013020834f) < 0.0002f ||
+                 MathF.Abs(uv[0] - 0.10286458f) < 0.0002f ||
+                 MathF.Abs(uv[0] - 0.20442709f) < 0.0002f ||
+                 MathF.Abs(uv[0] - 0.30598959f) < 0.0002f);
+
+            var glyph = _pendingBattleButtonGlyph is { } pending &&
+                MathF.Abs(bounds.MinX - pending.X) < 4f && MathF.Abs(bounds.MinY - pending.Y) < 4f &&
+                MathF.Abs(uv[0] - 0.0069444445f) < 0.0002f &&
+                MathF.Abs(uv[1] - 0.020833334f) < 0.0002f;
+            _pendingBattleButtonGlyph = border ? (bounds.MinX, bounds.MinY) : null;
+
+            if (!border && !glyph)
+                return false;
+            for (var i = 0; i < count; i++)
+                *(float*)(vertices + i * stride) -= BattleButtonGlyphShift;
+            return true;
         }
 
         private static (float MinX, float MaxX, float MinY, float MaxY) Bounds(nint vertices, int count, int stride)
